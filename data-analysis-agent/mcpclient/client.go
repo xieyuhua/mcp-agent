@@ -119,6 +119,8 @@ func Start(cfg StartConfig) (*Client, error) {
 	}
 	put("DB_DIALECT", cfg.DBDialect)
 	put("DB_DSN", cfg.DBDsn)
+	// 作为本地子进程时强制 stdio 传输（忽略被调方配置文件里的 http/both）。
+	put("TRANSPORT", "stdio")
 	if cfg.MaskEnabled {
 		put("MASK_ENABLED", "true")
 	} else {

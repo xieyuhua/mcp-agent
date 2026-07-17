@@ -1,0 +1,4 @@
+正在启动数据分析助手 (LLM=ollama/qwen3:8b, MCP=../mcp-data-server/main.exe)
+配置数据库: agent.db（后台管理页面: /admin）
+[agent] 使用本地内置 MCP 对接: ../mcp-data-server/main.exe
+[agent] 已以账号 admin 登录，角色=super_admin，token 已就绪

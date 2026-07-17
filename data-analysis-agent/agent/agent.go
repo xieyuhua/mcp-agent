@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"company.com/data-analysis-agent/config"
@@ -20,10 +21,23 @@ type Agent struct {
 	token   string
 	tools   []llm.Tool
 	schema  string
+
+	// mu 保护 cfg/llm/mcp/tools/schema 的热更新，避免与 Ask 并发竞争。
+	mu sync.Mutex
 }
 
 // New 构造 Agent：按配置启动 MCP（本地子进程或远程服务）、登录、预加载表结构。
 func New(cfg *config.Config) (*Agent, error) {
+	a := &Agent{cfg: cfg}
+	if err := a.initMCP(cfg); err != nil {
+		return nil, err
+	}
+	return a, nil
+}
+
+// initMCP 依据配置建立 MCP 连接（本地子进程或远程服务），并完成登录与表结构预加载。
+// 同时初始化 LLM 客户端与工具列表。可被 ApplyConfig 复用以热重建连接。
+func (a *Agent) initMCP(cfg *config.Config) error {
 	var mcp *mcpclient.Client
 	var builtin bool
 	var err error
@@ -53,21 +67,18 @@ func New(cfg *config.Config) (*Agent, error) {
 		})
 	}
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	a := &Agent{
-		cfg:     cfg,
-		llm:     llm.NewClient(cfg.LLM.Provider, cfg.LLM.BaseURL, cfg.LLM.Model, cfg.LLM.APIKey, cfg.LLM.Temperature, cfg.LLM.MaxTokens),
-		mcp:     mcp,
-		builtin: builtin,
-	}
+	a.mcp = mcp
+	a.builtin = builtin
+	a.llm = llm.NewClient(cfg.LLM.Provider, cfg.LLM.BaseURL, cfg.LLM.Model, cfg.LLM.APIKey, cfg.LLM.Temperature, cfg.LLM.MaxTokens)
 
 	// 内置模式：登录获取 token（后续所有 MCP 工具调用都需要）
 	if builtin {
 		if err := a.login(); err != nil {
 			mcp.Close()
-			return nil, err
+			return err
 		}
 	}
 
@@ -77,9 +88,40 @@ func New(cfg *config.Config) (*Agent, error) {
 	// 内置模式：预加载常见表结构，注入系统提示
 	if builtin {
 		a.schema = a.loadSchema([]string{"customers", "orders", "users", "tenants", "audit_logs"})
+	} else {
+		a.schema = ""
 	}
+	return nil
+}
 
-	return a, nil
+// ApplyConfig 热更新配置：重建 LLM 客户端；若 MCP 相关配置发生变化则重建 MCP 连接。
+// 调用方需保证在两次 Ask 之间或 Ask 持锁时调用，本方法自身加锁保证安全。
+func (a *Agent) ApplyConfig(cfg *config.Config) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	// LLM 配置总是重建（开销小、无副作用）。
+	a.cfg.LLM = cfg.LLM
+	a.llm = llm.NewClient(cfg.LLM.Provider, cfg.LLM.BaseURL, cfg.LLM.Model, cfg.LLM.APIKey, cfg.LLM.Temperature, cfg.LLM.MaxTokens)
+	a.cfg.Agent = cfg.Agent
+	a.cfg.Prompts = cfg.Prompts
+
+	// 仅当 MCP 相关配置发生变化时才重建连接（避免无谓地重启子进程）。
+	if mcpConfigChanged(a.cfg.MCP, cfg.MCP) {
+		fmt.Printf("[agent] 检测到 MCP 配置变化，重建 MCP 连接...\n")
+		old := a.mcp
+		if err := a.initMCP(cfg); err != nil {
+			return err
+		}
+		a.cfg.MCP = cfg.MCP
+		if old != nil {
+			old.Close()
+		}
+	} else {
+		// MCP 配置未变，仅同步其他字段（如凭据被后台修改也同步）。
+		a.cfg.MCP = cfg.MCP
+	}
+	return nil
 }
 
 // transportName 返回传输方式的可读名称（默认 streamable-http）。
@@ -88,6 +130,21 @@ func transportName(t string) string {
 		return "sse"
 	}
 	return "streamable-http"
+}
+
+// mcpConfigChanged 判断两份 MCP 配置在影响连接的字段上是否不同（决定是否重建连接）。
+func mcpConfigChanged(a, b config.MCPConfig) bool {
+	return a.Mode != b.Mode ||
+		a.ServerPath != b.ServerPath ||
+		a.DBDialect != b.DBDialect ||
+		a.DBDsn != b.DBDsn ||
+		a.MaskEnabled != b.MaskEnabled ||
+		a.SeedDemo != b.SeedDemo ||
+		a.Username != b.Username ||
+		a.Password != b.Password ||
+		a.BaseURL != b.BaseURL ||
+		a.Transport != b.Transport ||
+		a.APIKey != b.APIKey
 }
 
 // Close 释放资源。
@@ -251,47 +308,23 @@ func (a *Agent) loadSchema(tables []string) string {
 	return sb.String()
 }
 
-// systemPrompt 系统提示词。
+// systemPrompt 系统提示词（从配置读取，支持后台热更新）。
 func (a *Agent) systemPrompt() string {
 	if a.builtin {
-		return a.builtinSystemPrompt()
+		p := a.cfg.Prompts.Builtin
+		if p == "" {
+			p = config.DefaultBuiltinPrompt
+		}
+		if a.schema != "" {
+			p += "\n\n" + a.schema
+		}
+		return p
 	}
-	return a.remoteSystemPrompt()
-}
-
-// builtinSystemPrompt 内置 mcp-data-server（数据库分析）场景的提示词。
-func (a *Agent) builtinSystemPrompt() string {
-	p := "你是一个企业数据分析助手。你的工作流程是：\n" +
-		"1. 理解用户用自然语言提出的分析问题；\n" +
-		"2. 必要时用 describe_table 了解表结构，用 run_sql（平台运营）或 query_data（其他角色）生成并执行 SQL；\n" +
-		"3. 拿到查询结果后，用数据给出清晰、有洞察的分析结论（中文），并给出关键数字。\n\n" +
-		"4. 当结果适合可视化（分组对比、占比、趋势）时，调用 render_chart 生成图表，再给出文字结论。\n\n" +
-		"重要约束：\n" +
-		"- 你除了能做数据库数据分析，还可以用 query_weather 联网查询任意城市实时天气；\n" +
-		"- 只能进行只读分析，禁止任何写操作/删除/DDL；\n" +
-		"- 权限隔离、数据脱敏、危险 SQL 拦截都由后端 MCP 服务统一处理，你只需专注生成正确的分析 SQL；\n" +
-		"- 如果工具返回权限不足或报错，请如实告知用户原因，不要编造数据；\n" +
-		"- render_chart 的 categories 与每个 series.data 必须长度一致、顺序对应，数值取自真实查询结果；\n" +
-		"- 最终回答要面向业务，给出结论、数据支撑与建议。\n"
-	if a.schema != "" {
-		p += "\n" + a.schema
+	p := a.cfg.Prompts.Remote
+	if p == "" {
+		p = config.DefaultRemotePrompt
 	}
 	return p
-}
-
-// remoteSystemPrompt 对接通用远程 MCP 服务时的通用提示词。
-func (a *Agent) remoteSystemPrompt() string {
-	return "你是一个智能助手，可以调用多种工具来完成用户任务。\n" +
-		"可用工具包括：\n" +
-		"- 内置工具 query_weather（联网查询任意城市实时天气）；\n" +
-		"- 内置工具 render_chart（把分析结果生成图表供前端展示）；\n" +
-		"- 远程 MCP 服务提供的工具（见下方工具列表，名称与参数以工具定义为准）。\n\n" +
-		"工作准则：\n" +
-		"- 根据用户的自然语言问题，自行决定调用哪些工具，必要时可多次调用并组合结果；\n" +
-		"- 拿到工具返回后，用中文给出清晰、有依据的结论，并引用关键数据；\n" +
-		"- 如果工具返回错误或权限不足，请如实告知用户原因，不要编造数据；\n" +
-		"- render_chart 的 categories 与每个 series.data 必须长度一致、顺序对应，数值取自真实查询结果；\n" +
-		"- 最终回答要面向用户意图，给出结论、数据支撑与建议。\n"
 }
 
 // Ask 处理一次用户提问，返回最终分析文本（CLI 使用）。
@@ -305,6 +338,8 @@ func (a *Agent) Ask(question string) (string, error) {
 
 // AskRich 处理一次用户提问，返回结构化结果（含图表/数据/SQL/步骤），供 HTTP 前端使用。
 func (a *Agent) AskRich(question string) (*AskResult, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	messages := []llm.Message{
 		{Role: "system", Content: a.systemPrompt()},
 		{Role: "user", Content: question},

@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>数据分析助手 · 后台配置</title>
+<style>
+  :root {
+    --bg: #0f172a; --panel: #1e293b; --panel2: #273449; --border: #334155;
+    --text: #e2e8f0; --muted: #94a3b8; --primary: #6366f1; --primary2: #818cf8;
+    --ok: #22c55e; --err: #ef4444; --warn: #f59e0b;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--text); }
+  header { padding: 16px 24px; border-bottom: 1px solid var(--border); display: flex;
+    align-items: center; justify-content: space-between; background: var(--panel); }
+  header h1 { font-size: 18px; margin: 0; }
+  header .meta { font-size: 13px; color: var(--muted); }
+  .wrap { max-width: 980px; margin: 24px auto; padding: 0 16px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 18px 20px; margin-bottom: 18px; }
+  .card h2 { font-size: 15px; margin: 0 0 14px; color: var(--primary2);
+    border-left: 3px solid var(--primary); padding-left: 10px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 18px; }
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  .field.full { grid-column: 1 / -1; }
+  label { font-size: 13px; color: var(--muted); }
+  .desc { font-size: 11px; color: #64748b; }
+  input, select, textarea { background: var(--panel2); border: 1px solid var(--border);
+    color: var(--text); border-radius: 8px; padding: 9px 11px; font-size: 13px;
+    font-family: inherit; width: 100%; }
+  textarea { min-height: 130px; resize: vertical; line-height: 1.5; }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: var(--primary); }
+  .row { display: flex; align-items: center; gap: 8px; }
+  .btn { background: var(--primary); color: #fff; border: none; border-radius: 8px;
+    padding: 10px 18px; font-size: 14px; cursor: pointer; transition: .15s; }
+  .btn:hover { background: var(--primary2); }
+  .btn.ghost { background: transparent; border: 1px solid var(--border); color: var(--text); }
+  .btn.danger { background: transparent; border: 1px solid var(--err); color: var(--err); }
+  .actions { display: flex; gap: 12px; margin-top: 8px; }
+  #toast { position: fixed; top: 18px; left: 50%; transform: translateX(-50%);
+    padding: 10px 18px; border-radius: 8px; font-size: 14px; display: none; z-index: 99; }
+  #toast.ok { background: #064e3b; color: var(--ok); border: 1px solid var(--ok); }
+  #toast.err { background: #450a0a; color: var(--err); border: 1px solid var(--err); }
+  /* 登录遮罩 */
+  #login { position: fixed; inset: 0; background: rgba(15,23,42,.96); display: flex;
+    align-items: center; justify-content: center; z-index: 100; }
+  #login .box { width: 320px; }
+  #login h2 { color: var(--text); text-align: center; margin-bottom: 20px; }
+  .hidden { display: none !important; }
+  code { background: var(--panel2); padding: 1px 6px; border-radius: 4px; font-size: 12px; }
+</style>
+</head>
+<body>
+<div id="toast"></div>
+
+<div id="login">
+  <div class="box card">
+    <h2>后台登录</h2>
+    <div class="field">
+      <label>账号</label>
+      <input id="lu" placeholder="admin" />
+    </div>
+    <div class="field" style="margin-top:12px">
+      <label>密码</label>
+      <input id="lp" type="password" placeholder="admin123" />
+    </div>
+    <div class="actions" style="justify-content:center;margin-top:18px">
+      <button class="btn" onclick="doLogin()">登录</button>
+    </div>
+  </div>
+</div>
+
+<header>
+  <h1>数据分析助手 · 后台配置</h1>
+  <div class="meta">
+    <span id="who"></span>
+    <button class="btn ghost" style="margin-left:12px;padding:6px 12px;font-size:12px" onclick="logout()">退出</button>
+  </div>
+</header>
+
+<div class="wrap" id="app">
+  <div id="forms"></div>
+  <div class="actions" style="justify-content:flex-end">
+    <button class="btn danger" onclick="doReset()">恢复默认</button>
+    <button class="btn" onclick="doSave()">保存并应用</button>
+  </div>
+</div>
+
+<script>
+// 字段元数据：分组、标签、类型、选项。
+const SCHEMA = [
+  { group: "LLM 大模型", key: "llm.provider", label: "提供方", type: "select",
+    options: [["ollama","ollama"],["openai","openai"]] },
+  { group: "LLM 大模型", key: "llm.base_url", label: "服务地址", type: "text",
+    desc: "如 http://localhost:11434" },
+  { group: "LLM 大模型", key: "llm.model", label: "模型名", type: "text",
+    desc: "如 qwen2.5:14b / qwen3:8b" },
+  { group: "LLM 大模型", key: "llm.api_key", label: "API Key", type: "password",
+    desc: "本地 Ollama 可留空" },
+  { group: "LLM 大模型", key: "llm.temperature", label: "温度", type: "number", step: "0.1" },
+  { group: "LLM 大模型", key: "llm.max_tokens", label: "最大 Token", type: "number" },
+
+  { group: "MCP 对接（本地）", key: "mcp.mode", label: "对接模式", type: "select",
+    options: [["local","local"],["remote","remote"]] },
+  { group: "MCP 对接（本地）", key: "mcp.server_path", label: "mcp-data-server 路径", type: "text",
+    desc: "local 模式拉起的可执行文件" },
+  { group: "MCP 对接（本地）", key: "mcp.db_dialect", label: "后端数据库类型", type: "select",
+    options: [["sqlite","sqlite"],["mysql","mysql"]] },
+  { group: "MCP 对接（本地）", key: "mcp.db_dsn", label: "数据库连接串", type: "text", full: true,
+    desc: "sqlite: ./data.db ｜ mysql: user:pass@tcp(127.0.0.1:3306)/db?..." },
+  { group: "MCP 对接（本地）", key: "mcp.mask_enabled", label: "启用脱敏", type: "checkbox" },
+  { group: "MCP 对接（本地）", key: "mcp.seed_demo", label: "写入演示数据", type: "checkbox" },
+  { group: "MCP 对接（本地）", key: "mcp.username", label: "登录账号", type: "text" },
+  { group: "MCP 对接（本地）", key: "mcp.password", label: "登录密码", type: "password" },
+
+  { group: "MCP 对接（远程）", key: "mcp.base_url", label: "远程地址", type: "text",
+    desc: "如 http://127.0.0.1:9000/mcp" },
+  { group: "MCP 对接（远程）", key: "mcp.transport", label: "传输方式", type: "select",
+    options: [["streamable-http","streamable-http"],["sse","sse"]] },
+  { group: "MCP 对接（远程）", key: "mcp.api_key", label: "远程鉴权 Key", type: "password" },
+
+  { group: "Agent 编排", key: "agent.max_steps", label: "最大推理步数", type: "number" },
+  { group: "Agent 编排", key: "agent.use_native_tools", label: "原生工具调用", type: "checkbox" },
+  { group: "Agent 编排", key: "agent.max_result_rows", label: "结果最大行数", type: "number" },
+
+  { group: "系统提示词（内置场景）", key: "prompts.builtin", label: "内置数据库分析", type: "textarea", full: true },
+  { group: "系统提示词（远程场景）", key: "prompts.remote", label: "远程 MCP 场景", type: "textarea", full: true },
+
+  { group: "后台凭据", key: "admin.username", label: "后台账号", type: "text" },
+  { group: "后台凭据", key: "admin.password", label: "后台密码", type: "password" },
+];
+
+const TOKEN_KEY = "daa_admin_token";
+let VALUES = {};
+
+function token() { return localStorage.getItem(TOKEN_KEY) || ""; }
+function toast(msg, ok) {
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.className = ok ? "ok" : "err"; t.style.display = "block";
+  setTimeout(() => t.style.display = "none", 2600);
+}
+async function api(path, method, body) {
+  const opt = { method, headers: { "Content-Type": "application/json",
+    "Authorization": "Bearer " + token() } };
+  if (body) opt.body = JSON.stringify(body);
+  const r = await fetch(path, opt);
+  const data = await r.json().catch(() => ({}));
+  return { status: r.status, data };
+}
+
+async function doLogin() {
+  const r = await fetch("/api/admin/login", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username: document.getElementById("lu").value,
+      password: document.getElementById("lp").value })
+  });
+  const d = await r.json().catch(() => ({}));
+  if (r.ok && d.token) {
+    localStorage.setItem(TOKEN_KEY, d.token);
+    boot();
+  } else {
+    toast(d.error || "登录失败", false);
+  }
+}
+function logout() { localStorage.removeItem(TOKEN_KEY); location.reload(); }
+
+// 按分组渲染表单
+function render(values) {
+  VALUES = values;
+  const groups = {};
+  SCHEMA.forEach(f => { (groups[f.group] = groups[f.group] || []).push(f); });
+  const app = document.getElementById("forms");
+  app.innerHTML = "";
+  Object.keys(groups).forEach(g => {
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = "<h2>" + g + "</h2>";
+    const grid = document.createElement("div");
+    grid.className = "grid";
+    groups[g].forEach(f => grid.appendChild(fieldEl(f, values[f.key] ?? "")));
+    card.appendChild(grid);
+    app.appendChild(card);
+  });
+}
+function fieldEl(f, val) {
+  const wrap = document.createElement("div");
+  wrap.className = "field" + (f.full ? " full" : "");
+  const id = "f_" + f.key.replace(/\./g, "_");
+  let control;
+  if (f.type === "checkbox") {
+    control = '<div class="row"><input type="checkbox" id="' + id + '" ' +
+      (val === "true" ? "checked" : "") + ' style="width:auto" />' +
+      '<span class="desc">' + (f.desc || "") + '</span></div>';
+  } else if (f.type === "textarea") {
+    control = '<textarea id="' + id + '">' + escapeHtml(val) + '</textarea>';
+  } else if (f.type === "select") {
+    const opts = f.options.map(o => '<option value="' + o[0] + '"' +
+      (o[0] === val ? " selected" : "") + '>' + o[1] + '</option>').join("");
+    control = '<select id="' + id + '">' + opts + '</select>';
+  } else {
+    const t = f.type === "password" ? "password" : (f.type === "number" ? "number" : "text");
+    const step = f.step ? ' step="' + f.step + '"' : "";
+    control = '<input id="' + id + '" type="' + t + '"' + step + ' value="' +
+      escapeHtml(val) + '" />' + (f.desc ? '<span class="desc">' + f.desc + '</span>' : "");
+  }
+  wrap.innerHTML = "<label>" + f.label + "</label>" + control;
+  return wrap;
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+}
+function collect() {
+  const out = {};
+  SCHEMA.forEach(f => {
+    const id = "f_" + f.key.replace(/\./g, "_");
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (f.type === "checkbox") out[f.key] = el.checked ? "true" : "false";
+    else out[f.key] = el.value;
+  });
+  return out;
+}
+async function doSave() {
+  const values = collect();
+  const r = await api("/api/admin/config", "PUT", { values });
+  if (r.status === 200) {
+    toast("已保存并热应用 ✅", true);
+    render(values);
+  } else {
+    toast(r.data.error || "保存失败", false);
+  }
+}
+async function doReset() {
+  if (!confirm("确认恢复全部配置为内置默认值？当前数据库配置将被覆盖。")) return;
+  const r = await api("/api/admin/reset", "POST");
+  if (r.status === 200) { toast("已恢复默认 ✅", true); load(); }
+  else toast(r.data.error || "重置失败", false);
+}
+async function load() {
+  const r = await api("/api/admin/config", "GET");
+  if (r.status !== 200) { logout(); return; }
+  const items = r.data.items || [];
+  const map = {};
+  items.forEach(it => map[it.key] = it.value);
+  render(map);
+}
+async function boot() {
+  const r = await api("/api/admin/config", "GET");
+  if (r.status !== 200) { document.getElementById("login").classList.remove("hidden"); return; }
+  document.getElementById("login").classList.add("hidden");
+  document.getElementById("who").textContent = "已登录";
+  const items = r.data.items || [];
+  const map = {};
+  items.forEach(it => map[it.key] = it.value);
+  render(map);
+}
+// 启动：有 token 直接进入，否则显示登录
+if (token()) boot();
+else document.getElementById("login").classList.remove("hidden");
+</script>
+</body>
+</html>

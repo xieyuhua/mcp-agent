@@ -7,6 +7,8 @@ import (
 )
 
 // Config 数据分析助手运行配置。
+// 该结构同时用于：文件加载（config.json 作为初始种子）、数据库配置（运行时以 DB 为准）、
+// 后台管理页面展示与回写。
 type Config struct {
 	// LLM 本地大模型配置（兼容 Ollama / OpenAI 风格 chat 接口）。
 	LLM LLMConfig `json:"llm"`
@@ -16,6 +18,9 @@ type Config struct {
 
 	// Agent 行为参数。
 	Agent AgentConfig `json:"agent"`
+
+	// Prompts 系统提示词配置（可在后台编辑，存数据库，避免写死）。
+	Prompts PromptsConfig `json:"prompts"`
 }
 
 // LLMConfig 本地大模型连接配置。
@@ -32,6 +37,14 @@ type LLMConfig struct {
 	Temperature float64 `json:"temperature"`
 	// MaxTokens 单次生成上限。
 	MaxTokens int `json:"max_tokens"`
+}
+
+// PromptsConfig 系统提示词配置（可在后台编辑，持久化到数据库）。
+type PromptsConfig struct {
+	// Builtin 内置 mcp-data-server（数据库分析场景）的系统提示词。
+	Builtin string `json:"builtin"`
+	// Remote 对接通用远程 MCP 服务时的系统提示词。
+	Remote string `json:"remote"`
 }
 
 // MCPConfig 后端 MCP 服务配置，支持两种对接方案：
@@ -88,7 +101,7 @@ func Load(path string) (*Config, error) {
 	if path == "" {
 		path = os.Getenv("CONFIG_FILE")
 	}
-	c := defaultConfig()
+	c := DefaultConfig()
 	if path != "" {
 		b, err := os.ReadFile(path)
 		if err != nil {
@@ -119,17 +132,72 @@ func Load(path string) (*Config, error) {
 	if c.Agent.MaxResultRows == 0 {
 		c.Agent.MaxResultRows = 200
 	}
+	if c.Prompts.Builtin == "" {
+		c.Prompts.Builtin = DefaultBuiltinPrompt
+	}
+	if c.Prompts.Remote == "" {
+		c.Prompts.Remote = DefaultRemotePrompt
+	}
 	return c, nil
 }
 
-func defaultConfig() *Config {
+// DefaultBuiltinPrompt 内置 mcp-data-server（数据库分析）场景的默认系统提示词。
+// 运行时可在后台覆盖（存数据库），此处仅作为初始种子/兜底。
+const DefaultBuiltinPrompt = `你是一个企业数据分析助手。你的工作流程是：
+1. 理解用户用自然语言提出的分析问题；
+2. 必要时用 describe_table 了解表结构，用 run_sql（平台运营）或 query_data（其他角色）生成并执行 SQL；
+3. 拿到查询结果后，用数据给出清晰、有洞察的分析结论（中文），并给出关键数字。
+
+4. 当结果适合可视化（分组对比、占比、趋势）时，调用 render_chart 生成图表，再给出文字结论。
+
+重要约束：
+- 你除了能做数据库数据分析，还可以用 query_weather 联网查询任意城市实时天气；
+- 只能进行只读分析，禁止任何写操作/删除/DDL；
+- 权限隔离、数据脱敏、危险 SQL 拦截都由后端 MCP 服务统一处理，你只需专注生成正确的分析 SQL；
+- 如果工具返回权限不足或报错，请如实告知用户原因，不要编造数据；
+- render_chart 的 categories 与每个 series.data 必须长度一致、顺序对应，数值取自真实查询结果；
+- 最终回答要面向业务，给出结论、数据支撑与建议。`
+
+// DefaultRemotePrompt 对接通用远程 MCP 服务时的默认系统提示词。
+const DefaultRemotePrompt = `你是一个智能助手，可以调用多种工具来完成用户任务。
+可用工具包括：
+- 内置工具 query_weather（联网查询任意城市实时天气）；
+- 内置工具 render_chart（把分析结果生成图表供前端展示）；
+- 远程 MCP 服务提供的工具（见下方工具列表，名称与参数以工具定义为准）。
+
+工作准则：
+- 根据用户的自然语言问题，自行决定调用哪些工具，必要时可多次调用并组合结果；
+- 拿到工具返回后，用中文给出清晰、有依据的结论，并引用关键数据；
+- 如果工具返回错误或权限不足，请如实告知用户原因，不要编造数据；
+- render_chart 的 categories 与每个 series.data 必须长度一致、顺序对应，数值取自真实查询结果；
+- 最终回答要面向用户意图，给出结论、数据支撑与建议。`
+
+// DefaultConfig 返回带完整默认值的配置（不读取任何文件）。
+func DefaultConfig() *Config {
 	return &Config{
+		LLM: LLMConfig{
+			Provider:    "ollama",
+			BaseURL:     "http://localhost:11434",
+			Model:       "qwen2.5:14b",
+			Temperature: 0.2,
+			MaxTokens:   2048,
+		},
 		MCP: MCPConfig{
-			ServerPath: "../mcp-data-server/main.exe",
-			Username:   "admin",
-			Password:   "admin123",
+			Mode:        "local",
+			ServerPath:  "../mcp-data-server/main.exe",
+			Username:    "admin",
+			Password:    "admin123",
 			MaskEnabled: true,
 			SeedDemo:   true,
+		},
+		Agent: AgentConfig{
+			MaxSteps:        8,
+			UseNativeTools:  false,
+			MaxResultRows:   200,
+		},
+		Prompts: PromptsConfig{
+			Builtin: DefaultBuiltinPrompt,
+			Remote:  DefaultRemotePrompt,
 		},
 	}
 }

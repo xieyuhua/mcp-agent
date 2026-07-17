@@ -14,15 +14,17 @@ import (
 
 // Server 把数据分析 Agent 暴露为 HTTP 接口，供 Vue 前端调用。
 type Server struct {
-	ag       *agent.Agent
-	staticDir string
+	ag          *agent.Agent
+	staticDir   string
+	adminHandler http.Handler // 后台管理（配置 CRUD + 页面）
 	// mu 串行化 Ask 调用：本地大模型 + 单个 MCP 会话，串行更稳妥。
 	mu sync.Mutex
 }
 
-// New 构造 HTTP Server。staticDir 为前端构建产物目录（可为空，仅提供 API）。
-func New(ag *agent.Agent, staticDir string) *Server {
-	return &Server{ag: ag, staticDir: staticDir}
+// New 构造 HTTP Server。staticDir 为前端构建产物目录（可为空，仅提供 API）；
+// adminHandler 为后台管理路由（配置增删改查与页面），可为 nil。
+func New(ag *agent.Agent, staticDir string, adminHandler http.Handler) *Server {
+	return &Server{ag: ag, staticDir: staticDir, adminHandler: adminHandler}
 }
 
 // Handler 返回配置好路由的 http.Handler。
@@ -30,6 +32,13 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", s.handleHealth)
 	mux.HandleFunc("/api/ask", s.handleAsk)
+
+	// 后台管理：API 与页面（精确路径优先于下方的静态兜底）。
+	if s.adminHandler != nil {
+		mux.Handle("/api/admin/", s.adminHandler)
+		mux.Handle("/admin", s.adminHandler)
+		mux.Handle("/admin/", s.adminHandler)
+	}
 
 	// 静态资源托管（前端 dist）。若目录不存在则仅提供 API。
 	if s.staticDir != "" {

@@ -23,7 +23,7 @@ import (
 )
 
 func main() {
-	configPath := flag.String("config", "config.json", "配置文件路径")
+	configPath := flag.String("config", "", "配置文件路径（为空则用环境变量/内置默认值，便于作为子进程直接运行）")
 	flag.Parse()
 	cfg, err := config.Load(*configPath)
 	if err != nil {
