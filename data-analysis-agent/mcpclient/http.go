@@ -167,6 +167,10 @@ func (t *httpTransport) post(req rpcRequest, out interface{}) error {
 	if err != nil {
 		return err
 	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		// 通知（notification）通常返回 202 空响应体，无需解析
+		return nil
+	}
 	return decodeRPC(data, req.ID, out)
 }
 

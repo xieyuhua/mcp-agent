@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MCP 权限后台配置</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <!-- 登录页 -->
+  <div id="login" class="login-wrap">
+    <form class="login-card" id="loginForm">
+      <h1>MCP 权限后台</h1>
+      <p class="sub">mcp-data-server · 角色策略与脱敏规则配置</p>
+      <input id="username" placeholder="用户名" autocomplete="username" />
+      <input id="password" type="password" placeholder="密码" autocomplete="current-password" />
+      <button type="submit">登录</button>
+      <div id="loginErr" class="err"></div>
+    </form>
+  </div>
+
+  <!-- 主面板 -->
+  <div id="app" class="app hidden">
+    <header class="topbar">
+      <div class="brand">MCP 权限后台配置</div>
+      <div class="user">
+        <span id="who"></span>
+        <button id="logout" class="link">退出</button>
+      </div>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="policies">角色权限策略</button>
+      <button class="tab" data-tab="masks">数据脱敏规则</button>
+    </nav>
+
+    <main class="content">
+      <!-- 角色策略 -->
+      <section id="policies" class="panel">
+        <div class="toolbar">
+          <button id="refreshPolicies" class="btn">刷新</button>
+          <button id="newPolicy" class="btn primary">+ 新增策略</button>
+        </div>
+        <table id="policyTable">
+          <thead>
+            <tr><th>租户</th><th>角色</th><th>范围</th><th>可访问表</th><th>原SQL</th><th>更新人</th><th>更新时间</th><th>操作</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </section>
+
+      <!-- 脱敏规则 -->
+      <section id="masks" class="panel hidden">
+        <div class="toolbar">
+          <button id="refreshMasks" class="btn">刷新</button>
+          <button id="newMask" class="btn primary">+ 新增脱敏规则</button>
+        </div>
+        <table id="maskTable">
+          <thead>
+            <tr><th>租户</th><th>表</th><th>列</th><th>脱敏类型</th><th>启用</th><th>更新人</th><th>更新时间</th><th>操作</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </section>
+    </main>
+  </div>
+
+  <!-- 通用表单弹窗 -->
+  <div id="modal" class="modal hidden">
+    <div class="modal-card">
+      <h2 id="modalTitle"></h2>
+      <div id="modalBody"></div>
+      <div class="modal-actions">
+        <button id="modalCancel" class="btn">取消</button>
+        <button id="modalSave" class="btn primary">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

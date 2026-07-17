@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"company.com/mcp-data-server/config"
+	"company.com/mcp-data-server/internal/admin"
 	"company.com/mcp-data-server/internal/auth"
 	"company.com/mcp-data-server/internal/handler"
 	"company.com/mcp-data-server/internal/mask"
@@ -15,6 +18,7 @@ import (
 	"company.com/mcp-data-server/internal/repository"
 	"company.com/mcp-data-server/internal/service"
 	"company.com/mcp-data-server/internal/transport"
+	"company.com/mcp-data-server/internal/web"
 )
 
 func main() {
@@ -59,14 +63,70 @@ func main() {
 	toolHandler := handler.NewToolHandler(authSvc, querySvc, permSvc)
 	server := mcp.NewServer("mcp-data-server", "1.0.0", handler.Tools, toolHandler.Handle)
 
-	// 启动 stdio 传输层
-	stdio := transport.NewStdio(server)
-
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	log.Println("mcp-data-server started, listening on stdio")
-	if err := stdio.Run(ctx); err != nil && ctx.Err() == nil {
-		log.Fatalf("server stopped: %v", err)
+	// 根据 transport 配置启动对应传输层
+	switch strings.ToLower(cfg.Transport) {
+	case "http":
+		startHTTP(ctx, cfg, server, authSvc, permSvc)
+	case "both":
+		stdio := transport.NewStdio(server)
+		go func() {
+			log.Println("mcp-data-server stdio transport started")
+			if err := stdio.Run(ctx); err != nil && ctx.Err() == nil {
+				log.Printf("stdio stopped: %v", err)
+			}
+		}()
+		startHTTP(ctx, cfg, server, authSvc, permSvc)
+	default: // stdio（默认）
+		stdio := transport.NewStdio(server)
+		log.Println("mcp-data-server started, listening on stdio")
+		if err := stdio.Run(ctx); err != nil && ctx.Err() == nil {
+			log.Fatalf("server stopped: %v", err)
+		}
 	}
+}
+
+// startHTTP 启动 HTTP 传输（MCP over HTTP + 权限后台 + 内嵌 Web）。
+func startHTTP(ctx context.Context, cfg *config.Config, server *mcp.Server, authSvc *service.AuthService, permSvc *service.PermissionService) {
+	addr := cfg.HTTPAddr
+	if addr == "" {
+		addr = ":8081"
+	}
+	httpSrv := transport.NewHTTPServer(server)
+	adminSrv := admin.New(authSvc, permSvc)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/mcp", httpSrv.HandleStreamable) // streamable-http
+	mux.HandleFunc("/sse", httpSrv.HandleSSE)         // 旧版 sse 接收流
+	mux.HandleFunc("/messages", httpSrv.HandleMessages) // 旧版 sse 消息端点
+	mux.Handle("/api/admin/", adminSrv.Handler())      // 权限后台 REST API
+	mux.Handle("/", web.StaticHandler(cfg.WebDir))      // 内嵌/外部 Web 页面
+
+	handler := withCORS(mux)
+	log.Printf("mcp-data-server HTTP started: http://%s  (mcp=%s, sse=%s, admin=/api/admin, web=/)", normalizeAddr(addr), "/mcp", "/sse")
+	if err := http.ListenAndServe(addr, handler); err != nil && ctx.Err() == nil {
+		log.Fatalf("http server stopped: %v", err)
+	}
+}
+
+func withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func normalizeAddr(addr string) string {
+	if strings.HasPrefix(addr, ":") {
+		return "localhost" + addr
+	}
+	return addr
 }

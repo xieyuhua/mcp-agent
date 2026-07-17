@@ -1,0 +1,20 @@
+{
+  "llm": {
+    "provider": "ollama",
+    "base_url": "http://localhost:11343",
+    "model": "qwen3:8b",
+    "temperature": 0.2,
+    "max_tokens": 2048
+  },
+  "mcp": {
+    "mode": "remote",
+    "base_url": "http://127.0.0.1:8082/mcp",
+    "transport": "streamable-http",
+    "api_key": ""
+  },
+  "agent": {
+    "max_steps": 8,
+    "use_native_tools": true,
+    "max_result_rows": 200
+  }
+}
