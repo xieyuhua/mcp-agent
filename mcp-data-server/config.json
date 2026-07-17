@@ -1,0 +1,11 @@
+{
+  "db_dialect": "sqlite",
+  "db_dsn": "./data.db",
+  "jwt_secret": "change-me-in-production",
+  "mask_enabled": true,
+  "seed_demo": true,
+
+  "transport": "http",
+  "http_addr": ":8081",
+  "web_dir": ""
+}

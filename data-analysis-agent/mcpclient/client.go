@@ -93,6 +93,7 @@ type StartConfig struct {
 	Env         map[string]string
 	MaskEnabled bool
 	SeedDemo    bool
+	WorkDir     string
 }
 
 // Start 拉起本地 MCP 子进程（内置 mcp-data-server）并完成握手。
@@ -131,6 +132,7 @@ func Start(cfg StartConfig) (*Client, error) {
 	} else {
 		put("SEED_DEMO", "false")
 	}
+	put("WORK_DIR", cfg.WorkDir)
 	cmd.Env = env
 
 	stdin, err := cmd.StdinPipe()

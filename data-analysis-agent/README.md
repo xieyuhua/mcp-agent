@@ -43,12 +43,18 @@
 
 ```
 data-analysis-agent/
-├── main.go                 # 入口：REPL / 单次提问
-├── config.json             # 运行配置
+├── main.go                 # 入口：REPL / 单次提问 / -serve 启动 HTTP
+├── config.json             # 运行配置（首次作为数据库种子）
 ├── config/                 # 配置加载
 ├── mcpclient/              # MCP 客户端（传输层抽象：stdio 本地 / http 远程）
 ├── llm/                    # 本地大模型客户端（Ollama / OpenAI 兼容）
-└── agent/                  # Agent 编排（ReAct 循环 + 工具定义 + 权限处理）
+├── agent/                  # Agent 编排（ReAct 循环 + 工具定义 + 权限处理）
+├── server/                 # HTTP 服务（/api/ask、/api/models、聊天页、后台）
+├── internal/
+│   ├── confdb/             # 配置持久化到 SQLite（数据库为准 + 热更新）
+│   ├── admin/              # 后台管理（配置 CRUD + 页面，/admin）
+│   └── webui/              # 聊天前端页面（自包含单文件，/ 与 /ui）
+└── web/                    # 可选 Vue 前端（npm 构建后挂载于 /app/）
 ```
 
 ## 编译
@@ -83,6 +89,7 @@ go build -o data-analysis-agent.exe .
     "password": "admin123",
     "mask_enabled": true,                 // 是否启用脱敏
     "seed_demo": true,                    // 是否写入演示数据
+    "work_dir": "workdir",                // 文件工具沙箱根目录（透传 WORK_DIR 给 mcp 子进程）
     "base_url": "http://127.0.0.1:9000/mcp", // remote 模式：远程 MCP 地址
     "transport": "streamable-http",       // remote 模式：streamable-http(默认) | sse
     "api_key": ""                         // remote 模式：可选 Bearer 鉴权
@@ -111,6 +118,15 @@ go build -o data-analysis-agent.exe .
 
 > 权限说明：默认 `admin` 是 `super_admin`，可调用 `run_sql` 执行任意只读 SQL；
 > 若改用 `analyst1/analyst123` 等角色，则只能使用 `query_table`（结构化安全查询，自动叠加租户/区域/门店隔离并脱敏）。
+
+### 文件 / 目录读写工具（内置 mcp-data-server 提供）
+
+Agent 不做文件 I/O 实现，统一通过内置 `mcp-data-server` 暴露的文件工具完成，由 MCP 端做沙箱隔离与安全校验。暴露给大模型的工具包括：
+
+- `read_file(path, max_bytes?)` / `write_file(path, content)` / `append_file(path, content)`
+- `list_dir(path?)` / `make_dir(path)` / `delete_file(path)` / `read_dir_tree(path?)`
+
+这些工具的实现全部封装在 `mcp-data-server`（见其 README「文件读写配置」），所有路径相对 `work_dir` 沙箱，禁止越界访问。Agent 端仅负责把这些工具名/参数映射给模型，并在调用时自动注入登录 `token`。
 
 ### 远程 MCP 对接（mode=remote）
 
@@ -158,6 +174,26 @@ ollama pull qwen2.5:14b      # 或 llama3.1:8b 等
 ```powershell
 .\data-analysis-agent.exe -q "华东零售集团 paid 订单的总金额是多少？" -model qwen2.5:14b
 ```
+
+### Web UI（聊天页面，自适应）
+
+启动 HTTP 服务模式后，浏览器打开 `http://localhost:8088/` 即可使用自包含的聊天页面（无需 `npm build`，已通过 `embed` 内嵌进二进制）：
+
+```powershell
+.\data-analysis-agent.exe -serve -addr :8088
+```
+
+聊天页面特性：
+
+- **自适应布局**：桌面端居中卡片、移动端全宽，顶栏/输入区在小屏自动精简。
+- **基础设置抽屉**（右上角 ⚙）：可设置本次会话的 **模型 Model**、**生成温度 Temperature**、**最大 Token MaxTokens**，以及「默认展开分析过程 / 深色主题 / 自动滚动」等偏好；设置保存在浏览器 `localStorage`，刷新不丢。这些覆盖项只影响当次请求，不改动服务端运行配置。
+- **富文本结果**：支持 Markdown 渲染、表格展示、SQL 代码块，以及由 `render_chart` 工具驱动的 **Canvas 图表**（柱状 / 折线 / 饼图，随窗口自适应重绘）。
+- **分析过程**：可展开查看每步工具调用（工具名 / 参数 / 返回），便于排查。
+- **后台入口**：页内「后台」按钮跳转 `/admin`，可在数据库中配置 MCP / 提示词等并热更新。
+
+> 命令行也支持同样的基础设置：`-model`、`-temperature`、`-max-tokens` 三个 flag 会作为单次覆盖项生效（REPL 模式下整轮会话沿用）。
+
+若另行构建了 Vue 前端（`web/` 目录），产物会挂载在 `/app/` 路径下，与内嵌聊天页共存、互不冲突。
 
 ## 工作流程示例
 

@@ -10,11 +10,14 @@ import (
 	"sync"
 
 	"company.com/data-analysis-agent/agent"
+	"company.com/data-analysis-agent/internal/userdb"
+	"company.com/data-analysis-agent/internal/webui"
 )
 
-// Server 把数据分析 Agent 暴露为 HTTP 接口，供 Vue 前端调用。
+// Server 把数据分析 Agent 暴露为 HTTP 接口，供前端调用。
 type Server struct {
 	ag          *agent.Agent
+	users       *userdb.Store // 前端用户体系与多轮会话持久化
 	staticDir   string
 	adminHandler http.Handler // 后台管理（配置 CRUD + 页面）
 	// mu 串行化 Ask 调用：本地大模型 + 单个 MCP 会话，串行更稳妥。
@@ -22,9 +25,10 @@ type Server struct {
 }
 
 // New 构造 HTTP Server。staticDir 为前端构建产物目录（可为空，仅提供 API）；
-// adminHandler 为后台管理路由（配置增删改查与页面），可为 nil。
-func New(ag *agent.Agent, staticDir string, adminHandler http.Handler) *Server {
-	return &Server{ag: ag, staticDir: staticDir, adminHandler: adminHandler}
+// adminHandler 为后台管理路由（配置增删改查与页面），可为 nil；
+// users 为用户/会话存储（登录注册与多轮对话）。
+func New(ag *agent.Agent, users *userdb.Store, staticDir string, adminHandler http.Handler) *Server {
+	return &Server{ag: ag, users: users, staticDir: staticDir, adminHandler: adminHandler}
 }
 
 // Handler 返回配置好路由的 http.Handler。
@@ -32,6 +36,21 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", s.handleHealth)
 	mux.HandleFunc("/api/ask", s.handleAsk)
+	mux.HandleFunc("/api/models", s.handleModels)
+
+	// 用户体系：注册 / 登录 / 登出 / 当前用户。
+	mux.HandleFunc("/api/register", s.handleRegister)
+	mux.HandleFunc("/api/login", s.handleLogin)
+	mux.HandleFunc("/api/logout", s.handleLogout)
+	mux.HandleFunc("/api/me", s.handleMe)
+
+	// 多轮会话：列表 / 创建 / 删除 / 消息。
+	mux.HandleFunc("/api/conversations", s.handleConversations)          // GET 列表, POST 新建
+	mux.HandleFunc("/api/conversations/", s.handleConversationSub)       // /{id} DELETE, /{id}/messages GET
+
+	// 聊天前端页面（自包含，无需前端构建；精确路径优先于下方静态兜底）。
+	mux.HandleFunc("/ui", s.handleUI)
+	mux.HandleFunc("/", s.handleUI)
 
 	// 后台管理：API 与页面（精确路径优先于下方的静态兜底）。
 	if s.adminHandler != nil {
@@ -40,11 +59,12 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("/admin/", s.adminHandler)
 	}
 
-	// 静态资源托管（前端 dist）。若目录不存在则仅提供 API。
+	// 可选的 Vue 构建产物（web/dist）：挂载在 /app/ 前缀下，与内嵌聊天页共存，
+	// 互不冲突。目录不存在则仅提供内嵌页面与 API。
 	if s.staticDir != "" {
-		if _, err := os.Stat(s.staticDir); err == nil {
+		if info, err := os.Stat(s.staticDir); err == nil && info.IsDir() {
 			fs := http.FileServer(http.Dir(s.staticDir))
-			mux.Handle("/", spaFallback(s.staticDir, fs))
+			mux.Handle("/app/", http.StripPrefix("/app/", spaFallback(s.staticDir, fs)))
 		}
 	}
 	return withCORS(mux)
@@ -53,12 +73,10 @@ func (s *Server) Handler() http.Handler {
 // Run 启动 HTTP 服务。
 func (s *Server) Run(addr string) error {
 	log.Printf("[server] 数据分析助手 HTTP 服务已启动: http://%s", normalizeAddr(addr))
-	log.Printf("[server] API: POST /api/ask  健康检查: GET /api/health")
+	log.Printf("[server] 聊天页面: /   后台管理: /admin   API: POST /api/ask  健康检查: GET /api/health")
 	if s.staticDir != "" {
-		if _, err := os.Stat(s.staticDir); err == nil {
-			log.Printf("[server] 已托管前端静态资源: %s", s.staticDir)
-		} else {
-			log.Printf("[server] 未发现前端产物(%s)，仅提供 API；前端可用 vite dev 独立运行", s.staticDir)
+		if info, err := os.Stat(s.staticDir); err == nil && info.IsDir() {
+			log.Printf("[server] 已挂载 Vue 构建产物(%s) 于 /app/", s.staticDir)
 		}
 	}
 	return http.ListenAndServe(addr, s.Handler())
@@ -67,15 +85,35 @@ func (s *Server) Run(addr string) error {
 // askRequest 前端提问请求体。
 type askRequest struct {
 	Question string `json:"question"`
+	// ConversationID 多轮会话 ID；为空则自动新建一个会话。
+	ConversationID string `json:"conversation_id"`
+	// 以下为可选的基础设置覆盖项（来自 Web UI）。
+	Model       string  `json:"model"`
+	Temperature float64 `json:"temperature"`
+	MaxTokens   int     `json:"max_tokens"`
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok"})
 }
 
+// handleModels 返回当前生效的 LLM 配置，供前端"基础设置"初始化。
+func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"error": "仅支持 GET"})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.ag.LLMInfo())
+}
+
 func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"error": "仅支持 POST"})
+		return
+	}
+	user := s.currentUser(r)
+	if user == nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{"error": "请先登录"})
 		return
 	}
 	var req askRequest
@@ -89,15 +127,277 @@ func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// 解析/创建会话：会话必须归属当前用户。
+	conv, err := s.resolveConversation(user.ID, req.ConversationID, q)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
+		return
+	}
 
-	res, err := s.ag.AskRich(q)
+	// 读取会话历史作为上下文（多轮记忆），限制最近 N 条避免上下文爆炸。
+	history := s.loadHistory(user.ID, conv.ID, 20)
+
+	// 组装可选的基础设置覆盖项（空值表示沿用运行配置）。
+	var opts *agent.AskOptions
+	if req.Model != "" || req.Temperature > 0 || req.MaxTokens > 0 {
+		opts = &agent.AskOptions{
+			Model:       req.Model,
+			Temperature: req.Temperature,
+			MaxTokens:   req.MaxTokens,
+		}
+	}
+
+	s.mu.Lock()
+	res, aerr := s.ag.AskRichWithHistory(history, q, opts)
+	s.mu.Unlock()
+	if aerr != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": aerr.Error()})
+		return
+	}
+
+	// 持久化本轮问答（user + assistant）。assistant 的富结果存入 extra 供回放。
+	_, _ = s.users.AddMessage(conv.ID, "user", q, "")
+	extra := marshalExtra(res)
+	_, _ = s.users.AddMessage(conv.ID, "assistant", res.Answer, extra)
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"conversation_id": conv.ID,
+		"result":          res,
+	})
+}
+
+// resolveConversation 若传了会话 ID 则校验归属；否则用问题前缀作为标题新建会话。
+func (s *Server) resolveConversation(userID, convID, firstQ string) (*userdb.Conversation, error) {
+	if convID != "" {
+		return s.users.GetConversation(userID, convID)
+	}
+	title := firstQ
+	if len([]rune(title)) > 20 {
+		title = string([]rune(title)[:20]) + "…"
+	}
+	return s.users.CreateConversation(userID, title)
+}
+
+// loadHistory 读取会话最近 limit 条消息，转为 agent 历史格式。
+func (s *Server) loadHistory(userID, convID string, limit int) []agent.HistoryMessage {
+	msgs, err := s.users.ListMessages(userID, convID)
+	if err != nil {
+		return nil
+	}
+	if limit > 0 && len(msgs) > limit {
+		msgs = msgs[len(msgs)-limit:]
+	}
+	out := make([]agent.HistoryMessage, 0, len(msgs))
+	for _, m := range msgs {
+		out = append(out, agent.HistoryMessage{Role: m.Role, Content: m.Content})
+	}
+	return out
+}
+
+// marshalExtra 把富结果（图表/表格/SQL/步骤）序列化为 JSON 字符串存库，供前端回放。
+func marshalExtra(res *agent.AskResult) string {
+	b, err := json.Marshal(map[string]interface{}{
+		"chart": res.Chart,
+		"rows":  res.Rows,
+		"sql":   res.SQL,
+		"steps": res.Steps,
+	})
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// ---- 用户体系 ----
+
+type credRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+// currentUser 从请求中解析当前登录用户（Authorization: Bearer 或 X-Auth-Token 或 cookie）。
+func (s *Server) currentUser(r *http.Request) *userdb.User {
+	tok := bearerToken(r)
+	if tok == "" {
+		return nil
+	}
+	u, err := s.users.UserByToken(tok)
+	if err != nil {
+		return nil
+	}
+	return u
+}
+
+func bearerToken(r *http.Request) string {
+	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+		return strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
+	}
+	if t := r.Header.Get("X-Auth-Token"); t != "" {
+		return t
+	}
+	if c, err := r.Cookie("auth_token"); err == nil {
+		return c.Value
+	}
+	return ""
+}
+
+func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"error": "仅支持 POST"})
+		return
+	}
+	var req credRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "请求体解析失败"})
+		return
+	}
+	u, err := s.users.Register(req.Username, req.Password)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
+		return
+	}
+	// 注册后直接登录，返回令牌。
+	_, token, err := s.users.Login(req.Username, req.Password)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, res)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"token": token,
+		"user":  map[string]interface{}{"id": u.ID, "username": u.Username},
+	})
+}
+
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"error": "仅支持 POST"})
+		return
+	}
+	var req credRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "请求体解析失败"})
+		return
+	}
+	u, token, err := s.users.Login(req.Username, req.Password)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"token": token,
+		"user":  map[string]interface{}{"id": u.ID, "username": u.Username},
+	})
+}
+
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	s.users.Logout(bearerToken(r))
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
+}
+
+func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{"error": "未登录"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"id": u.ID, "username": u.Username})
+}
+
+// ---- 多轮会话 ----
+
+func (s *Server) handleConversations(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{"error": "请先登录"})
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		list, err := s.users.ListConversations(u.ID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"conversations": list})
+	case http.MethodPost:
+		var body struct {
+			Title string `json:"title"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		c, err := s.users.CreateConversation(u.ID, body.Title)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, c)
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"error": "方法不支持"})
+	}
+}
+
+// handleConversationSub 处理 /api/conversations/{id} 与 /api/conversations/{id}/messages。
+func (s *Server) handleConversationSub(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{"error": "请先登录"})
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/api/conversations/")
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "缺少会话 ID"})
+		return
+	}
+	convID := parts[0]
+
+	// /{id}/messages -> 获取消息历史
+	if len(parts) >= 2 && parts[1] == "messages" {
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"error": "方法不支持"})
+			return
+		}
+		msgs, err := s.users.ListMessages(u.ID, convID)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]interface{}{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"messages": msgs})
+		return
+	}
+
+	// /{id} -> DELETE 删除 / PATCH 重命名
+	switch r.Method {
+	case http.MethodDelete:
+		if err := s.users.DeleteConversation(u.ID, convID); err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]interface{}{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
+	case http.MethodPatch:
+		var body struct {
+			Title string `json:"title"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if err := s.users.RenameConversation(u.ID, convID, body.Title); err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]interface{}{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"error": "方法不支持"})
+	}
+}
+
+// handleUI 返回内嵌的聊天前端页面（自包含，无需前端构建）。
+func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
+	data, err := webui.Assets.ReadFile("chat.html")
+	if err != nil {
+		http.Error(w, "page not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(data)
 }
 
 // ---- 中间件 / 工具 ----
@@ -105,8 +405,8 @@ func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Auth-Token")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return

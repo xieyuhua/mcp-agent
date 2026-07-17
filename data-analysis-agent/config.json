@@ -15,6 +15,7 @@
     "password": "admin123",
     "mask_enabled": true,
     "seed_demo": true,
+    "work_dir": "workdir",
     "base_url": "http://127.0.0.1:9000/mcp",
     "transport": "streamable-http",
     "api_key": ""

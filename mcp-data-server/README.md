@@ -107,6 +107,20 @@ go mod tidy
 2. `query_table(token, table, fields?, filters?, order?, limit?, offset?)` → 隔离+脱敏结果
 3. `run_sql(token, sql)` → 仅 super_admin，只读校验
 4. `describe_table(token, table)` → 表结构
+5. 文件 / 目录读写（均限定在 `work_dir` 沙箱内，token 鉴权）：
+   - `read_file(token, path, max_bytes?)` → 读取文本文件内容
+   - `write_file(token, path, content)` → 覆盖写入（父目录自动创建）
+   - `append_file(token, path, content)` → 追加写入
+   - `list_dir(token, path?)` → 列出目录内容
+   - `make_dir(token, path)` → 创建目录（含多级父目录）
+   - `delete_file(token, path)` → 删除文件（不删目录）
+   - `read_dir_tree(token, path?)` → 递归目录树（最多两层）
+
+## 文件读写配置
+
+- 通过配置项 `work_dir`（或环境变量 `WORK_DIR`）指定文件工具的根目录（沙箱）。
+- 留空时默认进程工作目录。
+- 所有文件工具路径都相对于 `work_dir`，并强制拦截 `..` 越界访问，禁止读写沙箱之外的任何文件。
 
 ## 接入 MCP 客户端（示例：Claude Desktop）
 

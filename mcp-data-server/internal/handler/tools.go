@@ -141,4 +141,93 @@ var Tools = []mcp.Tool{
 			"required": []string{"token", "tenant_id", "table", "column"},
 		},
 	},
+
+	// --- 文件 / 目录读写工具（沙箱在 work_dir 内） ---
+	{
+		Name:        "read_file",
+		Description: "读取文本文件内容。路径相对于工作目录（沙箱）。用于查看配置文件、日志、数据导出等。二进制文件可能乱码。",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"token":    map[string]interface{}{"type": "string", "description": "登录令牌"},
+				"path":     map[string]interface{}{"type": "string", "description": "文件路径，相对于工作目录，如 reports/summary.txt"},
+				"max_bytes": map[string]interface{}{"type": "integer", "description": "最多读取字节数，默认 65536，最大 1048576"},
+			},
+			"required": []string{"token", "path"},
+		},
+	},
+	{
+		Name:        "write_file",
+		Description: "写入文本文件（覆盖）。父目录不存在时自动创建。路径相对于工作目录。用于生成报告、导出分析结果。",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"token":    map[string]interface{}{"type": "string", "description": "登录令牌"},
+				"path":     map[string]interface{}{"type": "string", "description": "文件路径，相对于工作目录，如 reports/summary.txt"},
+				"content":  map[string]interface{}{"type": "string", "description": "要写入的文本内容"},
+			},
+			"required": []string{"token", "path", "content"},
+		},
+	},
+	{
+		Name:        "append_file",
+		Description: "向文本文件末尾追加内容（文件不存在则创建）。路径相对于工作目录。用于日志追加、结果累积。",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"token":   map[string]interface{}{"type": "string", "description": "登录令牌"},
+				"path":    map[string]interface{}{"type": "string", "description": "文件路径，相对于工作目录"},
+				"content": map[string]interface{}{"type": "string", "description": "要追加的文本内容"},
+			},
+			"required": []string{"token", "path", "content"},
+		},
+	},
+	{
+		Name:        "list_dir",
+		Description: "列出目录下的文件和子目录（含名称、类型、大小、修改时间）。路径相对于工作目录，留空表示根目录。",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"token": map[string]interface{}{"type": "string", "description": "登录令牌"},
+				"path":  map[string]interface{}{"type": "string", "description": "目录路径，相对于工作目录，留空=根目录"},
+			},
+			"required": []string{"token"},
+		},
+	},
+	{
+		Name:        "make_dir",
+		Description: "创建目录（含多级父目录）。路径相对于工作目录。",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"token": map[string]interface{}{"type": "string", "description": "登录令牌"},
+				"path":  map[string]interface{}{"type": "string", "description": "目录路径，相对于工作目录"},
+			},
+			"required": []string{"token", "path"},
+		},
+	},
+	{
+		Name:        "delete_file",
+		Description: "删除一个文件（不会删除目录）。路径相对于工作目录。删除前请确认路径正确。",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"token": map[string]interface{}{"type": "string", "description": "登录令牌"},
+				"path":  map[string]interface{}{"type": "string", "description": "文件路径，相对于工作目录"},
+			},
+			"required": []string{"token", "path"},
+		},
+	},
+	{
+		Name:        "read_dir_tree",
+		Description: "递归列出目录树（最多两层，避免结果过大）。返回每个条目的相对路径与类型。用于了解工作目录整体结构。",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"token": map[string]interface{}{"type": "string", "description": "登录令牌"},
+				"path":  map[string]interface{}{"type": "string", "description": "起始目录，相对于工作目录，留空=根目录"},
+			},
+			"required": []string{"token"},
+		},
+	},
 }

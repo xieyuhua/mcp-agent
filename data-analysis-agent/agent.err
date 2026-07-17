@@ -1,4 +1,0 @@
-2026/07/17 22:45:02 mcp-data-server started, listening on stdio
-2026/07/17 22:45:02 [server] 数据分析助手 HTTP 服务已启动: http://localhost:8088
-2026/07/17 22:45:02 [server] API: POST /api/ask  健康检查: GET /api/health
-2026/07/17 22:45:02 [server] 未发现前端产物(web/dist)，仅提供 API；前端可用 vite dev 独立运行

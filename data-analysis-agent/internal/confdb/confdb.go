@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -202,6 +203,8 @@ const (
 	KeyMCPBaseURL  = "mcp.base_url"
 	KeyMCPTransport = "mcp.transport"
 	KeyMCPAPIKey   = "mcp.api_key"
+	// MCP（额外对接的远程服务列表，JSON 数组）
+	KeyMCPExtra = "mcp.extra"
 	// Agent
 	KeyAgentMaxSteps      = "agent.max_steps"
 	KeyAgentUseNative     = "agent.use_native_tools"
@@ -218,7 +221,7 @@ func validKey(k string) bool {
 	switch k {
 	case KeyLLMProvider, KeyLLMBaseURL, KeyLLMModel, KeyLLMAPIKey, KeyLLMTemperature, KeyLLMMaxTokens,
 		KeyMCPMode, KeyMCPServerPath, KeyMCPDBDialect, KeyMCPDBDSN, KeyMCPMask, KeyMCPSeed,
-		KeyMCPUsername, KeyMCPPassword, KeyMCPBaseURL, KeyMCPTransport, KeyMCPAPIKey,
+		KeyMCPUsername, KeyMCPPassword, KeyMCPBaseURL, KeyMCPTransport, KeyMCPAPIKey, KeyMCPExtra,
 		KeyAgentMaxSteps, KeyAgentUseNative, KeyAgentMaxResultRows,
 		KeyPromptBuiltin, KeyPromptRemote, KeyAdminUser, KeyAdminPass:
 		return true
@@ -250,6 +253,7 @@ func toItems(c *config.Config) []ConfigItem {
 		mk(KeyMCPBaseURL, c.MCP.BaseURL, "远程 MCP 地址（remote 模式）"),
 		mk(KeyMCPTransport, c.MCP.Transport, "远程传输方式：streamable-http | sse"),
 		mk(KeyMCPAPIKey, c.MCP.APIKey, "远程 MCP 鉴权 Key"),
+		mk(KeyMCPExtra, marshalExtra(c.MCP.Extra), "额外对接的远程 MCP 服务列表（JSON 数组）"),
 		mk(KeyAgentMaxSteps, itoa(c.Agent.MaxSteps), "ReAct 最大推理步数"),
 		mk(KeyAgentUseNative, b(c.Agent.UseNativeTools), "是否使用原生工具调用"),
 		mk(KeyAgentMaxResultRows, itoa(c.Agent.MaxResultRows), "工具返回最大行数"),
@@ -297,6 +301,8 @@ func applyItem(c *config.Config, key, value string) error {
 		c.MCP.Transport = value
 	case KeyMCPAPIKey:
 		c.MCP.APIKey = value
+	case KeyMCPExtra:
+		c.MCP.Extra = unmarshalExtra(value)
 	case KeyAgentMaxSteps:
 		c.Agent.MaxSteps = atoi(value)
 	case KeyAgentUseNative:
@@ -323,6 +329,31 @@ func b(v bool) string { return map[bool]string{true: "true", false: "false"}[v] 
 func isTrue(s string) bool {
 	return s == "true" || s == "1" || s == "yes" || s == "on"
 }
+// marshalExtra 序列化额外 MCP 列表为 JSON 字符串（空列表存 "[]"）。
+func marshalExtra(list []config.RemoteMCP) string {
+	if len(list) == 0 {
+		return "[]"
+	}
+	b, err := json.Marshal(list)
+	if err != nil {
+		return "[]"
+	}
+	return string(b)
+}
+
+// unmarshalExtra 从 JSON 字符串解析额外 MCP 列表（解析失败返回空）。
+func unmarshalExtra(s string) []config.RemoteMCP {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	var list []config.RemoteMCP
+	if err := json.Unmarshal([]byte(s), &list); err != nil {
+		return nil
+	}
+	return list
+}
+
 func f64(v float64) string  { return strconv.FormatFloat(v, 'f', -1, 64) }
 func itoa(v int) string     { return strconv.Itoa(v) }
 func atof(s string) float64 { v, _ := strconv.ParseFloat(s, 64); return v }

@@ -14,10 +14,11 @@ type ToolHandler struct {
 	auth       *service.AuthService
 	query      *service.QueryService
 	permission *service.PermissionService
+	workDir    string // 文件/目录工具沙箱根目录（绝对路径），空表示进程工作目录
 }
 
-func NewToolHandler(auth *service.AuthService, query *service.QueryService, permission *service.PermissionService) *ToolHandler {
-	return &ToolHandler{auth: auth, query: query, permission: permission}
+func NewToolHandler(auth *service.AuthService, query *service.QueryService, permission *service.PermissionService, workDir string) *ToolHandler {
+	return &ToolHandler{auth: auth, query: query, permission: permission, workDir: workDir}
 }
 
 // Handle 实现 mcp.CallHandler。
@@ -43,6 +44,21 @@ func (h *ToolHandler) Handle(ctx context.Context, name string, args map[string]i
 		return h.maskSet(ctx, args)
 	case "mask_delete":
 		return h.maskDelete(ctx, args)
+	// --- 文件 / 目录读写工具 ---
+	case "read_file":
+		return h.readFile(args)
+	case "write_file":
+		return h.writeFile(args)
+	case "append_file":
+		return h.appendFile(args)
+	case "list_dir":
+		return h.listDir(args)
+	case "make_dir":
+		return h.makeDir(args)
+	case "delete_file":
+		return h.deleteFile(args)
+	case "read_dir_tree":
+		return h.readDirTree(args)
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", name)
 	}

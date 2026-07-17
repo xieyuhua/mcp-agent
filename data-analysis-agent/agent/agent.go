@@ -22,8 +22,19 @@ type Agent struct {
 	tools   []llm.Tool
 	schema  string
 
+	// extraMCPs 额外对接的远程 MCP 客户端（与主 MCP 并存）。
+	extraMCPs []*extraMCP
+	// toolRoute 工具名 -> 提供该工具的额外 MCP 客户端。主 MCP 与内置 agent 工具不在此表内。
+	toolRoute map[string]*mcpclient.Client
+
 	// mu 保护 cfg/llm/mcp/tools/schema 的热更新，避免与 Ask 并发竞争。
 	mu sync.Mutex
+}
+
+// extraMCP 一个额外远程 MCP 连接及其元信息。
+type extraMCP struct {
+	name   string
+	client *mcpclient.Client
 }
 
 // New 构造 Agent：按配置启动 MCP（本地子进程或远程服务）、登录、预加载表结构。
@@ -64,6 +75,7 @@ func (a *Agent) initMCP(cfg *config.Config) error {
 			Env:         cfg.MCP.Env,
 			MaskEnabled: cfg.MCP.MaskEnabled,
 			SeedDemo:    cfg.MCP.SeedDemo,
+			WorkDir:     cfg.MCP.WorkDir,
 		})
 	}
 	if err != nil {
@@ -81,6 +93,9 @@ func (a *Agent) initMCP(cfg *config.Config) error {
 			return err
 		}
 	}
+
+	// 连接额外对接的远程 MCP 服务（可选，多个并存）。
+	a.connectExtraMCPs(cfg)
 
 	// 定义暴露给大模型的工具
 	a.tools = a.buildTools()
@@ -140,17 +155,31 @@ func mcpConfigChanged(a, b config.MCPConfig) bool {
 		a.DBDsn != b.DBDsn ||
 		a.MaskEnabled != b.MaskEnabled ||
 		a.SeedDemo != b.SeedDemo ||
+		a.WorkDir != b.WorkDir ||
 		a.Username != b.Username ||
 		a.Password != b.Password ||
 		a.BaseURL != b.BaseURL ||
 		a.Transport != b.Transport ||
-		a.APIKey != b.APIKey
+		a.APIKey != b.APIKey ||
+		extraMCPChanged(a.Extra, b.Extra)
+}
+
+// extraMCPChanged 比较两组额外 MCP 配置是否不同（用 JSON 序列化简单比较）。
+func extraMCPChanged(a, b []config.RemoteMCP) bool {
+	ab, _ := json.Marshal(a)
+	bb, _ := json.Marshal(b)
+	return string(ab) != string(bb)
 }
 
 // Close 释放资源。
 func (a *Agent) Close() {
 	if a.mcp != nil {
 		a.mcp.Close()
+	}
+	for _, em := range a.extraMCPs {
+		if em.client != nil {
+			em.client.Close()
+		}
 	}
 }
 
@@ -181,15 +210,71 @@ func (a *Agent) login() error {
 	return nil
 }
 
+// connectExtraMCPs 连接配置中声明的额外远程 MCP 服务（失败仅告警，不阻断启动）。
+func (a *Agent) connectExtraMCPs(cfg *config.Config) {
+	// 关闭旧连接，避免热更新时泄漏。
+	for _, em := range a.extraMCPs {
+		if em.client != nil {
+			em.client.Close()
+		}
+	}
+	a.extraMCPs = nil
+	for _, m := range cfg.MCP.Extra {
+		if strings.TrimSpace(m.BaseURL) == "" {
+			continue
+		}
+		name := m.Name
+		if name == "" {
+			name = m.BaseURL
+		}
+		cli, err := mcpclient.StartRemote(mcpclient.RemoteConfig{
+			BaseURL:   m.BaseURL,
+			Transport: m.Transport,
+			APIKey:    m.APIKey,
+			Headers:   m.Headers,
+			Timeout:   30 * time.Second,
+		})
+		if err != nil {
+			fmt.Printf("[agent] 额外 MCP [%s] 连接失败（已跳过）: %v\n", name, err)
+			continue
+		}
+		fmt.Printf("[agent] 已对接额外 MCP [%s]: %s，发现 %d 个工具\n", name, m.BaseURL, len(cli.Tools()))
+		a.extraMCPs = append(a.extraMCPs, &extraMCP{name: name, client: cli})
+	}
+}
+
 // buildTools 暴露给大模型的工具。
 // 内置 agent 工具（render_chart / query_weather）始终可用；
-// 数据类工具则依对接模式而定：内置 mcp-data-server 用写死的三个，远程 MCP 用其真实工具清单。
+// 数据类工具则依对接模式而定：内置 mcp-data-server 用写死的三个，远程 MCP 用其真实工具清单；
+// 此外聚合所有额外 MCP 的工具，并建立工具名 -> 客户端的路由表。
 func (a *Agent) buildTools() []llm.Tool {
 	tools := a.builtinAgentTools()
 	if a.builtin {
 		tools = append(tools, a.localDataTools()...)
 	} else {
 		for _, t := range a.mcp.Tools() {
+			tools = append(tools, llm.Tool{
+				Name:        t.Name,
+				Description: t.Description,
+				Parameters:  t.InputSchema,
+			})
+		}
+	}
+
+	// 聚合额外 MCP 工具并记录路由（同名工具以先注册者为准，跳过冲突）。
+	a.toolRoute = make(map[string]*mcpclient.Client)
+	existing := make(map[string]bool)
+	for _, t := range tools {
+		existing[t.Name] = true
+	}
+	for _, em := range a.extraMCPs {
+		for _, t := range em.client.Tools() {
+			if existing[t.Name] {
+				fmt.Printf("[agent] 额外 MCP [%s] 的工具 %s 与已有工具重名，已跳过\n", em.name, t.Name)
+				continue
+			}
+			existing[t.Name] = true
+			a.toolRoute[t.Name] = em.client
 			tools = append(tools, llm.Tool{
 				Name:        t.Name,
 				Description: t.Description,
@@ -205,7 +290,7 @@ func (a *Agent) builtinAgentTools() []llm.Tool {
 	return []llm.Tool{
 		{
 			Name:        "render_chart",
-			Description: "当分析结果适合可视化时调用，生成图表供前端展示。你需要从查询结果里提取聚合后的数值填入。适合展示分组对比、占比、趋势。调用后请再用一句话给出文字结论。",
+			Description: "当分析结果适合可视化时调用，生成图表供前端展示。你需要从查询结果里提取聚合后的数值填入，并【自动选择最合适的图表类型】：\n- 各分类数值的【大小对比】（如各状态订单数、各地区销量）→ 用 bar 柱状图；\n- 数值随【时间/顺序变化的趋势】（如按天/按月的金额走势）→ 用 line 折线图；\n- 各部分占【整体的比例/构成】（且分类数≤8，合计有意义）→ 用 pie 饼图。\n选型原则：比较用柱状、趋势用折线、占比用饼图。调用后请再用一句话给出文字结论。",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -282,6 +367,85 @@ func (a *Agent) localDataTools() []llm.Tool {
 				"required": []string{"sql"},
 			},
 		},
+		// --- 文件 / 目录读写（由内置 mcp-data-server 提供，沙箱在 work_dir 内） ---
+		{
+			Name:        "read_file",
+			Description: "读取文本文件内容（路径相对于 MCP 工作目录沙箱）。用于查看配置文件、日志、导出的数据等。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path":      map[string]interface{}{"type": "string", "description": "相对工作目录的文件路径，如 reports/summary.txt"},
+					"max_bytes": map[string]interface{}{"type": "integer", "description": "最多读取字节数，默认 65536，最大 1048576"},
+				},
+				"required": []string{"path"},
+			},
+		},
+		{
+			Name:        "write_file",
+			Description: "写入文本文件（覆盖，父目录自动创建）。用于生成分析报告、导出查询结果。路径相对于工作目录。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path":    map[string]interface{}{"type": "string", "description": "相对工作目录的文件路径"},
+					"content": map[string]interface{}{"type": "string", "description": "要写入的文本"},
+				},
+				"required": []string{"path", "content"},
+			},
+		},
+		{
+			Name:        "append_file",
+			Description: "向文件末尾追加文本（不存在则创建）。用于日志累积、结果追加。路径相对于工作目录。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path":    map[string]interface{}{"type": "string", "description": "相对工作目录的文件路径"},
+					"content": map[string]interface{}{"type": "string", "description": "要追加的文本"},
+				},
+				"required": []string{"path", "content"},
+			},
+		},
+		{
+			Name:        "list_dir",
+			Description: "列出目录下的文件与子目录（含名称/类型/大小/修改时间）。路径相对于工作目录，留空=根目录。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path": map[string]interface{}{"type": "string", "description": "相对工作目录的目录路径，留空=根目录"},
+				},
+			},
+		},
+		{
+			Name:        "make_dir",
+			Description: "创建目录（含多级父目录）。路径相对于工作目录。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path": map[string]interface{}{"type": "string", "description": "相对工作目录的目录路径"},
+				},
+				"required": []string{"path"},
+			},
+		},
+		{
+			Name:        "delete_file",
+			Description: "删除一个文件（不会删除目录）。路径相对于工作目录。删除前确认路径正确。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path": map[string]interface{}{"type": "string", "description": "相对工作目录的文件路径"},
+				},
+				"required": []string{"path"},
+			},
+		},
+		{
+			Name:        "read_dir_tree",
+			Description: "递归列出目录树（最多两层）。用于了解工作目录整体结构。路径相对于工作目录，留空=根目录。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path": map[string]interface{}{"type": "string", "description": "相对工作目录的起始目录，留空=根目录"},
+				},
+			},
+		},
 	}
 }
 
@@ -327,32 +491,101 @@ func (a *Agent) systemPrompt() string {
 	return p
 }
 
+// AskOptions 单次提问的可选覆盖项（来自 Web UI 的"基础设置"）。
+// 字段为空/零值表示沿用运行配置，不覆盖。
+type AskOptions struct {
+	Model       string  `json:"model"`        // 覆盖模型名
+	Temperature float64 `json:"temperature"`  // 覆盖生成温度（<=0 表示沿用）
+	MaxTokens   int     `json:"max_tokens"`   // 覆盖单次生成上限（<=0 表示沿用）
+}
+
+// LLMInfo 返回当前生效的 LLM 配置摘要，供前端"基础设置"初始化。
+func (a *Agent) LLMInfo() map[string]interface{} {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return map[string]interface{}{
+		"provider":    a.cfg.LLM.Provider,
+		"base_url":    a.cfg.LLM.BaseURL,
+		"model":       a.cfg.LLM.Model,
+		"temperature": a.cfg.LLM.Temperature,
+		"max_tokens":  a.cfg.LLM.MaxTokens,
+	}
+}
+
 // Ask 处理一次用户提问，返回最终分析文本（CLI 使用）。
 func (a *Agent) Ask(question string) (string, error) {
-	res, err := a.AskRich(question)
+	return a.AskWith(question, nil)
+}
+
+// AskWith 同 Ask，但允许传入单次覆盖项（CLI 的基础设置：模型/温度/max_tokens）。
+func (a *Agent) AskWith(question string, opts *AskOptions) (string, error) {
+	res, err := a.AskRich(question, opts)
 	if err != nil {
 		return "", err
 	}
 	return res.Answer, nil
 }
 
+// HistoryMessage 一条历史对话消息（用于多轮上下文记忆）。
+type HistoryMessage struct {
+	Role    string // user | assistant
+	Content string
+}
+
 // AskRich 处理一次用户提问，返回结构化结果（含图表/数据/SQL/步骤），供 HTTP 前端使用。
-func (a *Agent) AskRich(question string) (*AskResult, error) {
+// opts 为可选的单次覆盖项（模型/温度/max_tokens）；为 nil 时完全沿用运行配置。
+func (a *Agent) AskRich(question string, opts *AskOptions) (*AskResult, error) {
+	return a.AskRichWithHistory(nil, question, opts)
+}
+
+// AskRichWithHistory 在带历史上下文的情况下处理一次提问，实现多轮对话记忆。
+// history 为按时间正序排列的既往消息（不含本次 question）。
+func (a *Agent) AskRichWithHistory(history []HistoryMessage, question string, opts *AskOptions) (*AskResult, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
+	// 若前端携带覆盖项，则本次使用一个临时 LLM 客户端，不影响全局运行配置。
+	llmClient := a.llm
+	if opts != nil && (opts.Model != "" || opts.Temperature > 0 || opts.MaxTokens > 0) {
+		model := a.cfg.LLM.Model
+		temp := a.cfg.LLM.Temperature
+		maxTok := a.cfg.LLM.MaxTokens
+		if opts.Model != "" {
+			model = opts.Model
+		}
+		if opts.Temperature > 0 {
+			temp = opts.Temperature
+		}
+		if opts.MaxTokens > 0 {
+			maxTok = opts.MaxTokens
+		}
+		llmClient = llm.NewClient(a.cfg.LLM.Provider, a.cfg.LLM.BaseURL, model, a.cfg.LLM.APIKey, temp, maxTok)
+	}
+
 	messages := []llm.Message{
 		{Role: "system", Content: a.systemPrompt()},
-		{Role: "user", Content: question},
 	}
+	// 注入历史上下文（多轮记忆）。仅保留 user/assistant 文本，避免污染工具协议。
+	for _, h := range history {
+		role := h.Role
+		if role != "user" && role != "assistant" {
+			continue
+		}
+		if strings.TrimSpace(h.Content) == "" {
+			continue
+		}
+		messages = append(messages, llm.Message{Role: role, Content: h.Content})
+	}
+	messages = append(messages, llm.Message{Role: "user", Content: question})
 	result := &AskResult{}
 
 	for step := 0; step < a.cfg.Agent.MaxSteps; step++ {
 		var resp *llm.Response
 		var err error
 		if a.cfg.Agent.UseNativeTools {
-			resp, err = a.llm.Chat(messages, a.tools)
+			resp, err = llmClient.Chat(messages, a.tools)
 		} else {
-			resp, err = a.llm.Chat(messages, nil)
+			resp, err = llmClient.Chat(messages, nil)
 			// 退化模式：尝试从文本中解析工具调用
 			if err == nil {
 				resp = a.parseFallbackToolCall(resp, &messages)
@@ -403,6 +636,21 @@ func (a *Agent) executeTool(tc llm.ToolCall, result *AskResult) string {
 			return "天气查询失败: " + err.Error()
 		}
 		return desc
+	}
+
+	// 额外对接的远程 MCP 工具：按路由表转发到对应客户端（通用 MCP，不注入 token）。
+	if cli, ok := a.toolRoute[tc.Name]; ok {
+		text, isErr, err := cli.CallTool(tc.Name, args)
+		if err != nil {
+			return fmt.Sprintf("工具调用出错: %v", err)
+		}
+		if isErr {
+			return "工具执行失败: " + text
+		}
+		if rows := parseRows(text); rows != nil {
+			result.Rows = rows
+		}
+		return a.truncateResult(text)
 	}
 
 	// 内置 mcp-data-server 需要注入 token 并把模型工具名映射到后端真实名；

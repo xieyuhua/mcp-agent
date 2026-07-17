@@ -23,7 +23,7 @@ import (
 )
 
 func main() {
-	configPath := flag.String("config", "", "配置文件路径（为空则用环境变量/内置默认值，便于作为子进程直接运行）")
+	configPath := flag.String("config", "config.json", "配置文件路径（为空则用环境变量/内置默认值，便于作为子进程直接运行）")
 	flag.Parse()
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -63,7 +63,7 @@ func main() {
 	querySvc := service.NewQueryService(queryRepo, auditSvc, authz, masker, cfg.MaskEnabled)
 	permSvc := service.NewPermissionService(permRepo, authz, masker, auditSvc)
 
-	toolHandler := handler.NewToolHandler(authSvc, querySvc, permSvc)
+	toolHandler := handler.NewToolHandler(authSvc, querySvc, permSvc, cfg.WorkDir)
 	server := mcp.NewServer("mcp-data-server", "1.0.0", handler.Tools, toolHandler.Handle)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -101,10 +101,10 @@ func startHTTP(ctx context.Context, cfg *config.Config, server *mcp.Server, auth
 	adminSrv := admin.New(authSvc, permSvc)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/mcp", httpSrv.HandleStreamable) // streamable-http
-	mux.HandleFunc("/sse", httpSrv.HandleSSE)         // 旧版 sse 接收流
+	mux.HandleFunc("/mcp", httpSrv.HandleStreamable)    // streamable-http
+	mux.HandleFunc("/sse", httpSrv.HandleSSE)           // 旧版 sse 接收流
 	mux.HandleFunc("/messages", httpSrv.HandleMessages) // 旧版 sse 消息端点
-	mux.Handle("/api/admin/", adminSrv.Handler())      // 权限后台 REST API
+	mux.Handle("/api/admin/", adminSrv.Handler())       // 权限后台 REST API
 	mux.Handle("/", web.StaticHandler(cfg.WebDir))      // 内嵌/外部 Web 页面
 
 	handler := withCORS(mux)

@@ -19,6 +19,10 @@ type Config struct {
 	HTTPAddr string `json:"http_addr"`
 	// WebDir 外部 Web 资源目录；为空时由二进制内嵌资源提供（可分离部署）。
 	WebDir string `json:"web_dir"`
+
+	// WorkDir 文件/目录读写工具的根目录（沙箱）。为空时默认进程工作目录。
+	// 所有文件工具都只能在该目录及其子目录内操作，禁止越界访问。
+	WorkDir string `json:"work_dir"`
 }
 
 // Load 加载配置：先读文件，再用环境变量覆盖。
@@ -65,6 +69,9 @@ func Load(path string) (*Config, error) {
 	}
 	if v := os.Getenv("WEB_DIR"); v != "" {
 		c.WebDir = v
+	}
+	if v := os.Getenv("WORK_DIR"); v != "" {
+		c.WorkDir = v
 	}
 	return c, nil
 }
