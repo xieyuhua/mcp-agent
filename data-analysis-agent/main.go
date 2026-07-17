@@ -30,8 +30,13 @@ func main() {
 		cfg.LLM.Model = *model
 	}
 
+	// 根据 MCP 对接模式打印不同的后端信息（避免 remote 模式误显示 server_path）。
+	mcpInfo := cfg.MCP.ServerPath
+	if strings.EqualFold(cfg.MCP.Mode, "remote") {
+		mcpInfo = cfg.MCP.BaseURL + " (" + remoteTransportName(cfg.MCP.Transport) + ")"
+	}
 	fmt.Printf("正在启动数据分析助手 (LLM=%s/%s, MCP=%s)\n",
-		cfg.LLM.Provider, cfg.LLM.Model, cfg.MCP.ServerPath)
+		cfg.LLM.Provider, cfg.LLM.Model, mcpInfo)
 
 	ag, err := agent.New(cfg)
 	if err != nil {
@@ -85,4 +90,12 @@ func main() {
 		fmt.Println("\n助手> " + answer)
 	}
 	fmt.Println("再见。")
+}
+
+// remoteTransportName 返回远程 MCP 传输方式的可读名称（默认 streamable-http）。
+func remoteTransportName(t string) string {
+	if strings.EqualFold(t, "sse") {
+		return "sse"
+	}
+	return "streamable-http"
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log"
 	"net/http"
 	"os"
@@ -22,7 +23,9 @@ import (
 )
 
 func main() {
-	cfg, err := config.Load("")
+	configPath := flag.String("config", "config.json", "配置文件路径")
+	flag.Parse()
+	cfg, err := config.Load(*configPath)
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}

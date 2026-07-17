@@ -4,8 +4,7 @@
   "jwt_secret": "change-me-in-production",
   "mask_enabled": true,
   "seed_demo": true,
-
-  "transport": "both",
-  "http_addr": ":8081",
+  "transport": "http",
+  "http_addr": ":9000",
   "web_dir": ""
 }

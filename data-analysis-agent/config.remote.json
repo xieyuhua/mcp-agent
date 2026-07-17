@@ -8,7 +8,7 @@
   },
   "mcp": {
     "mode": "remote",
-    "base_url": "http://127.0.0.1:8082/mcp",
+    "base_url": "http://127.0.0.1:9000/mcp",
     "transport": "streamable-http",
     "api_key": ""
   },
