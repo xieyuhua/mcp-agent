@@ -1,0 +1,23 @@
+{
+  "llm": {
+    "provider": "ollama",
+    "base_url": "http://localhost:11343",
+    "model": "qwen3:8b",
+    "temperature": 0.2,
+    "max_tokens": 2048
+  },
+  "mcp": {
+    "server_path": "../mcp-data-server/main.exe",
+    "db_dialect": "sqlite",
+    "db_dsn": "./data.db",
+    "username": "admin",
+    "password": "admin123",
+    "mask_enabled": true,
+    "seed_demo": true
+  },
+  "agent": {
+    "max_steps": 8,
+    "use_native_tools": true,
+    "max_result_rows": 200
+  }
+}

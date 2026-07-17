@@ -44,5 +44,11 @@ func Load(path string) (*Config, error) {
 	if v := os.Getenv("JWT_SECRET"); v != "" {
 		c.JWTSecret = v
 	}
+	if v := os.Getenv("SEED_DEMO"); v != "" {
+		c.SeedDemo = v == "true" || v == "1" || v == "yes"
+	}
+	if v := os.Getenv("MASK_ENABLED"); v != "" {
+		c.MaskEnabled = v == "true" || v == "1" || v == "yes"
+	}
 	return c, nil
 }
