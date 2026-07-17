@@ -1,0 +1,24 @@
+# 编译产物
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# 运行时数据库（配置库 / 业务库）
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# 前端构建产物
+web/dist/
+node_modules/
+
+# 日志
+*.log
+*.err
+
+# 临时文件
+*.tmp
+.DS_Store

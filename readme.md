@@ -23,12 +23,15 @@ agent/
 │   │   └── mask/          # 脱敏
 │   └── README.md          # 服务详细说明
 └── data-analysis-agent/   # Agent 主体
-    ├── config.json        # 默认配置（local 内置模式）
+    ├── config.json        # 默认配置（local 内置模式，首次运行作为数据库种子）
     ├── config.remote.json # remote 对接模式示例（对接 HTTP MCP）
     ├── agent/             # Agent 编排 + 工具 + 天气查询
     ├── mcpclient/         # MCP 客户端（stdio 本地 / http 远程）
     ├── llm/               # 本地大模型客户端（Ollama / OpenAI）
     ├── server/            # HTTP 服务模式（供前端调用）
+    ├── internal/
+    │   ├── confdb/        # 配置持久化（SQLite 配置表 + 内存缓存）
+    │   └── admin/         # Agent 后台管理（登录 / 配置 CRUD / 内嵌页面）
     └── README.md          # Agent 详细说明
 ```
 
@@ -59,6 +62,7 @@ chmod +x start.sh && ./start.sh
 
 启动后：
 - Agent API：`http://localhost:8088`（POST `/api/ask`）
+- Agent 后台配置：`http://localhost:8088/admin`（浏览器打开，用 `admin / admin123` 登录，可配置 LLM / MCP / Agent 参数 / 系统提示词，即时生效）
 - MCP 权限后台：`http://localhost:9000`（浏览器打开，用 `admin / admin123` 登录配置权限）
 
 ### 方式二：内置模式（mcp-data-server 作为子进程）
@@ -122,6 +126,21 @@ go build -o main.exe ./cmd/server
 }
 ```
 
+## Agent 后台配置（数据库化，推荐）
+
+Agent 的运行配置（LLM / MCP / Agent 参数 / 系统提示词 / 后台凭据）不再写死在代码或文件里，
+而是持久化到 SQLite（`agent.db`，首次运行从 `config.json` 播种），可通过后台页面**免重启热更新**：
+
+- 打开 `http://localhost:8088/admin` → 用 `admin / admin123` 登录。
+- 可配置分组：
+  - **LLM 大模型**：提供方、地址、模型名、API Key、温度、最大 Token。
+  - **MCP 对接**：local（子进程路径 / 数据库类型 / 连接串 / 脱敏 / 演示数据 / 账号密码）或 remote（地址 / 传输方式 / 鉴权 Key）。
+  - **Agent 编排**：最大推理步数、是否原生工具调用、结果最大行数。
+  - **系统提示词**：内置数据库分析场景、远程 MCP 场景（可直接编辑，不再写死）。
+  - **后台凭据**：后台登录账号 / 密码。
+- 点击「保存并应用」：写入数据库并即时热更新到运行中的 Agent（LLM 立即换模型；改 MCP 相关项会自动重连 MCP 服务）；「恢复默认」可重置为内置默认值。
+- 后台 API（需 Bearer token）：`POST /api/admin/login`、`GET/PUT /api/admin/config`、`POST /api/admin/reset`。
+
 ## 验证
 
 两个服务均提供健康检查：
@@ -133,3 +152,5 @@ go build -o main.exe ./cmd/server
 - **Agent 启动报 LLM 连接失败**：确认 Ollama 已启动且模型已拉取（`ollama pull qwen3:8b`）。
 - **remote 模式连不上 MCP**：确认 mcp-data-server 已以 `transport=http` 启动，且 `base_url` 端口一致（默认 9000）。
 - **权限后台 403**：用 `admin / admin123` 登录获取 token，后台 API 仅 `super_admin` 可访问。
+- **Agent 后台打不开 / 改配置报未授权**：Agent 后台在 `http://localhost:8088/admin`，用 `admin / admin123` 登录；API 需在 Header 带 `Authorization: Bearer <token>`。
+- **想改系统提示词/模型但不想重启**：直接在 `http://localhost:8088/admin` 修改并「保存并应用」即可，无需重启进程。
