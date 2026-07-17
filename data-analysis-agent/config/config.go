@@ -11,7 +11,7 @@ type Config struct {
 	// LLM 本地大模型配置（兼容 Ollama / OpenAI 风格 chat 接口）。
 	LLM LLMConfig `json:"llm"`
 
-	// MCP 后端：即前面开发的 mcp-data-server（stdio 子进程）。
+	// MCP 后端：内置 mcp-data-server（stdio 子进程）或远程 MCP 服务（HTTP）。
 	MCP MCPConfig `json:"mcp"`
 
 	// Agent 行为参数。
@@ -34,8 +34,14 @@ type LLMConfig struct {
 	MaxTokens int `json:"max_tokens"`
 }
 
-// MCPConfig 后端 MCP 服务（mcp-data-server）配置。
+// MCPConfig 后端 MCP 服务配置，支持两种对接方案：
+//   - mode="local"（默认）：拉起内置 mcp-data-server 子进程（stdio）
+//   - mode="remote"：对接远程 MCP 服务（streamable-http / sse）
 type MCPConfig struct {
+	// Mode 对接方案："local" | "remote"，默认 local。
+	Mode string `json:"mode"`
+
+	// --- local（内置 mcp-data-server 子进程）相关 ---
 	// ServerPath 编译好的 mcp-data-server 可执行文件路径。
 	ServerPath string `json:"server_path"`
 	// DBDialect 后端数据库类型：sqlite（默认，演示）| mysql（真实数据分析）。
@@ -46,13 +52,25 @@ type MCPConfig struct {
 	DBDsn string `json:"db_dsn"`
 	// 传给子进程的额外环境变量（覆盖 db_dialect/db_dsn 等）。
 	Env map[string]string `json:"env"`
-	// 登录凭据：Agent 启动后以该账号登录，获取 token 用于后续工具调用。
-	Username string `json:"username"`
-	Password string `json:"password"`
 	// 是否启用脱敏（透传给 mcp-data-server 的 MASK_ENABLED）。
 	MaskEnabled bool `json:"mask_enabled"`
 	// 是否写入演示数据（透传给 mcp-data-server 的 SEED_DEMO）。
 	SeedDemo bool `json:"seed_demo"`
+
+	// --- remote（远程 MCP 服务）相关 ---
+	// BaseURL 远程地址，如 http://192.168.1.10:9000/mcp 或 .../sse
+	BaseURL string `json:"base_url"`
+	// Transport 远程传输方式："streamable-http"（默认）| "sse"（旧版）。
+	Transport string `json:"transport"`
+	// APIKey 远程服务鉴权（放入 Authorization: Bearer）。
+	APIKey string `json:"api_key"`
+	// Headers 远程请求额外头（如自定义鉴权）。
+	Headers map[string]string `json:"headers"`
+
+	// 登录凭据：本地模式以该账号登录 mcp-data-server 获取 token；
+	// 远程模式若远程服务也需要登录，可在此提供（由对应实现使用）。
+	Username string `json:"username"`
+	Password string `json:"password"`
 }
 
 // AgentConfig Agent 编排参数。

@@ -18,30 +18,84 @@ type ToolMeta struct {
 	InputSchema map[string]interface{} `json:"inputSchema"`
 }
 
-// Client 是一个 MCP stdio 客户端：拉起 mcp-data-server 子进程，
-// 通过换行分隔的 JSON-RPC 与之通信。
+// Transport MCP 传输层抽象。stdio 本地子进程与 http 远程均实现该接口。
+type Transport interface {
+	// Initialize 完成握手：initialize + initialized 通知 + tools/list。
+	Initialize() error
+	Notify(method string, params interface{}) error
+	Call(method string, params interface{}, out interface{}) error
+	Close() error
+	// Tools 返回已发现的工具清单（Initialize 之后可用）。
+	Tools() []ToolMeta
+}
+
+// Client 对外暴露的 MCP 客户端，内部委托给具体 Transport。
 type Client struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout *bufio.Reader
-	mu     sync.Mutex
-	nextID int
+	t Transport
+}
 
+// Tools 返回工具清单。
+func (c *Client) Tools() []ToolMeta { return c.t.Tools() }
+
+// HasTool 是否存在某工具。
+func (c *Client) HasTool(name string) bool {
+	for _, t := range c.t.Tools() {
+		if t.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// CallTool 调用一个 MCP 工具，返回文本结果；isError 指示工具执行是否报错。
+func (c *Client) CallTool(name string, args map[string]interface{}) (text string, isError bool, err error) {
+	var out struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		IsError bool `json:"isError"`
+	}
+	if err := c.t.Call("tools/call", map[string]interface{}{
+		"name":      name,
+		"arguments": args,
+	}, &out); err != nil {
+		return "", false, err
+	}
+	var sb string
+	for _, c0 := range out.Content {
+		if c0.Type == "text" {
+			sb += c0.Text
+		}
+	}
+	return sb, out.IsError, nil
+}
+
+// Close 关闭底层 Transport。
+func (c *Client) Close() { c.t.Close() }
+
+// ---- stdio 传输（本地子进程）----
+
+type stdioTransport struct {
+	cmd     *exec.Cmd
+	stdin   io.WriteCloser
+	stdout  *bufio.Reader
+	mu      sync.Mutex
+	nextID  int
 	tools   []ToolMeta
-	toolSet map[string]bool
 }
 
-// StartConfig 启动子进程所需参数。
+// StartConfig 启动本地子进程所需参数。
 type StartConfig struct {
-	ServerPath string
-	DBDialect  string
-	DBDsn      string
-	Env        map[string]string
+	ServerPath  string
+	DBDialect   string
+	DBDsn       string
+	Env         map[string]string
 	MaskEnabled bool
-	SeedDemo   bool
+	SeedDemo    bool
 }
 
-// Start 拉起 MCP 子进程并完成 initialize 握手。
+// Start 拉起本地 MCP 子进程（内置 mcp-data-server）并完成握手。
 func Start(cfg StartConfig) (*Client, error) {
 	if cfg.ServerPath == "" {
 		return nil, fmt.Errorf("mcp server path is empty")
@@ -91,78 +145,63 @@ func Start(cfg StartConfig) (*Client, error) {
 		return nil, fmt.Errorf("start mcp server: %w", err)
 	}
 
-	c := &Client{
+	c := &stdioTransport{
 		cmd:    cmd,
 		stdin:  stdin,
 		stdout: bufio.NewReader(stdout),
-		toolSet: map[string]bool{},
 	}
+	if err := c.Initialize(); err != nil {
+		c.Close()
+		return nil, err
+	}
+	return &Client{t: c}, nil
+}
 
-	// initialize 握手（无需解析返回体）
-	if err := c.call("initialize", map[string]interface{}{
+func (t *stdioTransport) Initialize() error {
+	if err := t.Call("initialize", map[string]interface{}{
 		"protocolVersion": "2024-11-05",
 		"capabilities":    map[string]interface{}{},
 		"clientInfo":      map[string]interface{}{"name": "data-analysis-agent", "version": "1.0.0"},
 	}, nil); err != nil {
-		c.Close()
-		return nil, fmt.Errorf("initialize: %w", err)
+		return fmt.Errorf("initialize: %w", err)
 	}
-
-	// 发送 initialized 通知（无需响应）
-	_ = c.notify("notifications/initialized", map[string]interface{}{})
-
-	// 拉取工具清单
+	if err := t.Notify("notifications/initialized", map[string]interface{}{}); err != nil {
+		return fmt.Errorf("initialized notify: %w", err)
+	}
 	var list struct {
 		Tools []ToolMeta `json:"tools"`
 	}
-	if err := c.call("tools/list", map[string]interface{}{}, &list); err != nil {
-		c.Close()
-		return nil, fmt.Errorf("tools/list: %w", err)
+	if err := t.Call("tools/list", map[string]interface{}{}, &list); err != nil {
+		return fmt.Errorf("tools/list: %w", err)
 	}
-	c.tools = list.Tools
-	for _, t := range c.tools {
-		c.toolSet[t.Name] = true
-	}
-	return c, nil
+	t.tools = list.Tools
+	return nil
 }
 
-// Tools 返回工具清单。
-func (c *Client) Tools() []ToolMeta { return c.tools }
+func (t *stdioTransport) Tools() []ToolMeta { return t.tools }
 
-// HasTool 是否存在某工具。
-func (c *Client) HasTool(name string) bool { return c.toolSet[name] }
-
-// CallTool 调用一个 MCP 工具，返回文本结果；isError 指示工具执行是否报错。
-func (c *Client) CallTool(name string, args map[string]interface{}) (text string, isError bool, err error) {
-	var out struct {
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
-		IsError bool `json:"isError"`
+func (t *stdioTransport) Notify(method string, params interface{}) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	req := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  method,
+		"params":  params,
 	}
-	if err := c.call("tools/call", map[string]interface{}{
-		"name":      name,
-		"arguments": args,
-	}, &out); err != nil {
-		return "", false, err
+	b, err := json.Marshal(req)
+	if err != nil {
+		return err
 	}
-	var sb string
-	for _, c0 := range out.Content {
-		if c0.Type == "text" {
-			sb += c0.Text
-		}
-	}
-	return sb, out.IsError, nil
+	_, err = t.stdin.Write(append(b, '\n'))
+	return err
 }
 
-// call 发送一个请求并等待匹配 id 的响应。
-func (c *Client) call(method string, params interface{}, out interface{}) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (t *stdioTransport) Call(method string, params interface{}, out interface{}) error {
+	t.mu.Lock()
+	t.nextID++
+	id := t.nextID
+	t.mu.Unlock()
 
-	c.nextID++
-	id := c.nextID
 	req := map[string]interface{}{
 		"jsonrpc": "2.0",
 		"id":      id,
@@ -173,13 +212,12 @@ func (c *Client) call(method string, params interface{}, out interface{}) error 
 	if err != nil {
 		return err
 	}
-	if _, err := c.stdin.Write(append(b, '\n')); err != nil {
+	if _, err := t.stdin.Write(append(b, '\n')); err != nil {
 		return fmt.Errorf("write request: %w", err)
 	}
 
-	// 读取直到拿到匹配 id 的响应
 	for {
-		line, err := c.stdout.ReadBytes('\n')
+		line, err := t.stdout.ReadBytes('\n')
 		if len(line) > 0 {
 			var resp struct {
 				ID     json.RawMessage `json:"id"`
@@ -189,7 +227,6 @@ func (c *Client) call(method string, params interface{}, out interface{}) error 
 				} `json:"error"`
 			}
 			if jerr := json.Unmarshal(line, &resp); jerr == nil && resp.ID != nil {
-				// 校验 id 匹配
 				var got int
 				if uerr := json.Unmarshal(resp.ID, &got); uerr == nil && got == id {
 					if resp.Error != nil {
@@ -210,29 +247,12 @@ func (c *Client) call(method string, params interface{}, out interface{}) error 
 	}
 }
 
-// notify 发送一个通知（无 id，无响应）。
-func (c *Client) notify(method string, params interface{}) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	req := map[string]interface{}{
-		"jsonrpc": "2.0",
-		"method":  method,
-		"params":  params,
+func (t *stdioTransport) Close() error {
+	if t.stdin != nil {
+		_ = t.stdin.Close()
 	}
-	b, err := json.Marshal(req)
-	if err != nil {
-		return err
+	if t.cmd != nil && t.cmd.Process != nil {
+		_ = t.cmd.Process.Kill()
 	}
-	_, err = c.stdin.Write(append(b, '\n'))
-	return err
-}
-
-// Close 关闭客户端并终止子进程。
-func (c *Client) Close() {
-	if c.stdin != nil {
-		_ = c.stdin.Close()
-	}
-	if c.cmd != nil && c.cmd.Process != nil {
-		_ = c.cmd.Process.Kill()
-	}
+	return nil
 }

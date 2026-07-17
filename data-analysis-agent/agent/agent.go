@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"company.com/data-analysis-agent/config"
 	"company.com/data-analysis-agent/llm"
@@ -15,44 +16,78 @@ type Agent struct {
 	cfg     *config.Config
 	llm     *llm.Client
 	mcp     *mcpclient.Client
+	builtin bool // 是否为内置 mcp-data-server（需要 token 注入与工具名映射）
 	token   string
 	tools   []llm.Tool
 	schema  string
 }
 
-// New 构造 Agent：启动 MCP 子进程、登录、预加载表结构。
+// New 构造 Agent：按配置启动 MCP（本地子进程或远程服务）、登录、预加载表结构。
 func New(cfg *config.Config) (*Agent, error) {
-	mcp, err := mcpclient.Start(mcpclient.StartConfig{
-		ServerPath:  cfg.MCP.ServerPath,
-		DBDialect:   cfg.MCP.DBDialect,
-		DBDsn:       cfg.MCP.DBDsn,
-		Env:         cfg.MCP.Env,
-		MaskEnabled: cfg.MCP.MaskEnabled,
-		SeedDemo:    cfg.MCP.SeedDemo,
-	})
+	var mcp *mcpclient.Client
+	var builtin bool
+	var err error
+
+	if strings.EqualFold(cfg.MCP.Mode, "remote") {
+		// 远程 MCP 服务对接（无需本地子进程）
+		builtin = false
+		fmt.Printf("[agent] 使用远程 MCP 对接: %s (transport=%s)\n", cfg.MCP.BaseURL, transportName(cfg.MCP.Transport))
+		mcp, err = mcpclient.StartRemote(mcpclient.RemoteConfig{
+			BaseURL:   cfg.MCP.BaseURL,
+			Transport: cfg.MCP.Transport,
+			APIKey:    cfg.MCP.APIKey,
+			Headers:   cfg.MCP.Headers,
+			Timeout:   30 * time.Second,
+		})
+	} else {
+		// 本地内置 mcp-data-server 子进程
+		builtin = true
+		fmt.Printf("[agent] 使用本地内置 MCP 对接: %s\n", cfg.MCP.ServerPath)
+		mcp, err = mcpclient.Start(mcpclient.StartConfig{
+			ServerPath:  cfg.MCP.ServerPath,
+			DBDialect:   cfg.MCP.DBDialect,
+			DBDsn:       cfg.MCP.DBDsn,
+			Env:         cfg.MCP.Env,
+			MaskEnabled: cfg.MCP.MaskEnabled,
+			SeedDemo:    cfg.MCP.SeedDemo,
+		})
+	}
 	if err != nil {
 		return nil, err
 	}
 
 	a := &Agent{
-		cfg: cfg,
-		llm: llm.NewClient(cfg.LLM.Provider, cfg.LLM.BaseURL, cfg.LLM.Model, cfg.LLM.APIKey, cfg.LLM.Temperature, cfg.LLM.MaxTokens),
-		mcp: mcp,
+		cfg:     cfg,
+		llm:     llm.NewClient(cfg.LLM.Provider, cfg.LLM.BaseURL, cfg.LLM.Model, cfg.LLM.APIKey, cfg.LLM.Temperature, cfg.LLM.MaxTokens),
+		mcp:     mcp,
+		builtin: builtin,
 	}
 
-	// 登录获取 token（后续所有 MCP 工具调用都需要）
-	if err := a.login(); err != nil {
-		mcp.Close()
-		return nil, err
+	// 内置模式：登录获取 token（后续所有 MCP 工具调用都需要）
+	if builtin {
+		if err := a.login(); err != nil {
+			mcp.Close()
+			return nil, err
+		}
 	}
 
 	// 定义暴露给大模型的工具
 	a.tools = a.buildTools()
 
-	// 预加载常见表结构，注入系统提示
-	a.schema = a.loadSchema([]string{"customers", "orders", "users", "tenants", "audit_logs"})
+	// 内置模式：预加载常见表结构，注入系统提示
+	if builtin {
+		a.schema = a.loadSchema([]string{"customers", "orders", "users", "tenants", "audit_logs"})
+	}
 
 	return a, nil
+}
+
+// transportName 返回传输方式的可读名称（默认 streamable-http）。
+func transportName(t string) string {
+	if strings.EqualFold(t, "sse") {
+		return "sse"
+	}
+	return "streamable-http"
 }
 
 // Close 释放资源。
@@ -89,46 +124,28 @@ func (a *Agent) login() error {
 	return nil
 }
 
-// buildTools 暴露给大模型的工具（这些工具最终都走 MCP，由 mcp-data-server 做权限/隔离/脱敏/审计）。
+// buildTools 暴露给大模型的工具。
+// 内置 agent 工具（render_chart / query_weather）始终可用；
+// 数据类工具则依对接模式而定：内置 mcp-data-server 用写死的三个，远程 MCP 用其真实工具清单。
 func (a *Agent) buildTools() []llm.Tool {
+	tools := a.builtinAgentTools()
+	if a.builtin {
+		tools = append(tools, a.localDataTools()...)
+	} else {
+		for _, t := range a.mcp.Tools() {
+			tools = append(tools, llm.Tool{
+				Name:        t.Name,
+				Description: t.Description,
+				Parameters:  t.InputSchema,
+			})
+		}
+	}
+	return tools
+}
+
+// builtinAgentTools Agent 内置工具（不论 MCP 模式都可用）。
+func (a *Agent) builtinAgentTools() []llm.Tool {
 	return []llm.Tool{
-		{
-			Name:        "describe_table",
-			Description: "查看某张数据表的字段结构（列名）。在编写 SQL 前先了解表结构。",
-			Parameters: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"table": map[string]interface{}{"type": "string", "description": "表名，如 customers / orders"},
-				},
-				"required": []string{"table"},
-			},
-		},
-		{
-			Name:        "query_data",
-			Description: "结构化安全查询（推荐给非管理员角色）：按表名+字段+过滤条件查询，自动叠加租户/区域/门店隔离并对敏感字段脱敏。",
-			Parameters: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"table":   map[string]interface{}{"type": "string", "description": "表名: customers | orders"},
-					"fields":  map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "返回字段，留空返回全部"},
-					"filters": map[string]interface{}{"type": "object", "description": "等值过滤，如 {\"status\":\"paid\"}"},
-					"order":   map[string]interface{}{"type": "string", "description": "排序，如 amount desc"},
-					"limit":   map[string]interface{}{"type": "integer", "description": "返回行数上限，默认100，最大1000"},
-				},
-				"required": []string{"table"},
-			},
-		},
-		{
-			Name:        "run_sql",
-			Description: "执行原生只读 SQL（仅平台运营 super_admin 可用）。用于复杂分析（聚合、联表、分组统计）。MCP 会自动拦截危险关键字并做权限/审计。优先使用 SELECT。",
-			Parameters: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"sql": map[string]interface{}{"type": "string", "description": "SELECT 语句，例如 SELECT status, COUNT(*) AS cnt, SUM(amount) AS total FROM orders GROUP BY status"},
-				},
-				"required": []string{"sql"},
-			},
-		},
 		{
 			Name:        "render_chart",
 			Description: "当分析结果适合可视化时调用，生成图表供前端展示。你需要从查询结果里提取聚合后的数值填入。适合展示分组对比、占比、趋势。调用后请再用一句话给出文字结论。",
@@ -168,6 +185,49 @@ func (a *Agent) buildTools() []llm.Tool {
 	}
 }
 
+// localDataTools 本地内置 mcp-data-server 的数据库分析工具（带中文描述与映射）。
+func (a *Agent) localDataTools() []llm.Tool {
+	return []llm.Tool{
+		{
+			Name:        "describe_table",
+			Description: "查看某张数据表的字段结构（列名）。在编写 SQL 前先了解表结构。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"table": map[string]interface{}{"type": "string", "description": "表名，如 customers / orders"},
+				},
+				"required": []string{"table"},
+			},
+		},
+		{
+			Name:        "query_data",
+			Description: "结构化安全查询（推荐给非管理员角色）：按表名+字段+过滤条件查询，自动叠加租户/区域/门店隔离并对敏感字段脱敏。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"table":   map[string]interface{}{"type": "string", "description": "表名: customers | orders"},
+					"fields":  map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "返回字段，留空返回全部"},
+					"filters": map[string]interface{}{"type": "object", "description": "等值过滤，如 {\"status\":\"paid\"}"},
+					"order":   map[string]interface{}{"type": "string", "description": "排序，如 amount desc"},
+					"limit":   map[string]interface{}{"type": "integer", "description": "返回行数上限，默认100，最大1000"},
+				},
+				"required": []string{"table"},
+			},
+		},
+		{
+			Name:        "run_sql",
+			Description: "执行原生只读 SQL（仅平台运营 super_admin 可用）。用于复杂分析（聚合、联表、分组统计）。MCP 会自动拦截危险关键字并做权限/审计。优先使用 SELECT。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"sql": map[string]interface{}{"type": "string", "description": "SELECT 语句，例如 SELECT status, COUNT(*) AS cnt, SUM(amount) AS total FROM orders GROUP BY status"},
+				},
+				"required": []string{"sql"},
+			},
+		},
+	}
+}
+
 // loadSchema 预加载表结构，拼成系统提示片段。
 func (a *Agent) loadSchema(tables []string) string {
 	var sb strings.Builder
@@ -193,6 +253,14 @@ func (a *Agent) loadSchema(tables []string) string {
 
 // systemPrompt 系统提示词。
 func (a *Agent) systemPrompt() string {
+	if a.builtin {
+		return a.builtinSystemPrompt()
+	}
+	return a.remoteSystemPrompt()
+}
+
+// builtinSystemPrompt 内置 mcp-data-server（数据库分析）场景的提示词。
+func (a *Agent) builtinSystemPrompt() string {
 	p := "你是一个企业数据分析助手。你的工作流程是：\n" +
 		"1. 理解用户用自然语言提出的分析问题；\n" +
 		"2. 必要时用 describe_table 了解表结构，用 run_sql（平台运营）或 query_data（其他角色）生成并执行 SQL；\n" +
@@ -209,6 +277,21 @@ func (a *Agent) systemPrompt() string {
 		p += "\n" + a.schema
 	}
 	return p
+}
+
+// remoteSystemPrompt 对接通用远程 MCP 服务时的通用提示词。
+func (a *Agent) remoteSystemPrompt() string {
+	return "你是一个智能助手，可以调用多种工具来完成用户任务。\n" +
+		"可用工具包括：\n" +
+		"- 内置工具 query_weather（联网查询任意城市实时天气）；\n" +
+		"- 内置工具 render_chart（把分析结果生成图表供前端展示）；\n" +
+		"- 远程 MCP 服务提供的工具（见下方工具列表，名称与参数以工具定义为准）。\n\n" +
+		"工作准则：\n" +
+		"- 根据用户的自然语言问题，自行决定调用哪些工具，必要时可多次调用并组合结果；\n" +
+		"- 拿到工具返回后，用中文给出清晰、有依据的结论，并引用关键数据；\n" +
+		"- 如果工具返回错误或权限不足，请如实告知用户原因，不要编造数据；\n" +
+		"- render_chart 的 categories 与每个 series.data 必须长度一致、顺序对应，数值取自真实查询结果；\n" +
+		"- 最终回答要面向用户意图，给出结论、数据支撑与建议。\n"
 }
 
 // Ask 处理一次用户提问，返回最终分析文本（CLI 使用）。
@@ -287,13 +370,19 @@ func (a *Agent) executeTool(tc llm.ToolCall, result *AskResult) string {
 		return desc
 	}
 
-	args["token"] = a.token // 权限令牌由 Agent 注入，模型无需关心
-
-	// 把面向大模型的工具名映射到 MCP 后端工具名
-	mcpName := a.mcpToolName(tc.Name)
-	if !a.mcp.HasTool(mcpName) {
-		return fmt.Sprintf("未知工具: %s (映射后: %s)", tc.Name, mcpName)
+	// 内置 mcp-data-server 需要注入 token 并把模型工具名映射到后端真实名；
+	// 远程通用 MCP 直接以模型给出的工具名转发，不注入 token。
+	var mcpName string
+	if a.builtin {
+		args["token"] = a.token
+		mcpName = a.mcpToolName(tc.Name)
+	} else {
+		mcpName = tc.Name
 	}
+	if !a.mcp.HasTool(mcpName) {
+		return fmt.Sprintf("未知工具: %s", mcpName)
+	}
+
 	text, isErr, err := a.mcp.CallTool(mcpName, args)
 	if err != nil {
 		return fmt.Sprintf("工具调用出错: %v", err)
@@ -302,8 +391,8 @@ func (a *Agent) executeTool(tc llm.ToolCall, result *AskResult) string {
 		return "工具执行失败: " + text
 	}
 
-	// 记录 SQL 与返回的数据行，供前端表格/图表兜底展示。
-	if tc.Name == "run_sql" {
+	// 记录 SQL 与返回的数据行，供前端表格/图表兜底展示（仅内置模式有 run_sql）。
+	if a.builtin && tc.Name == "run_sql" {
 		if sql, ok := args["sql"].(string); ok {
 			result.SQL = sql
 		}

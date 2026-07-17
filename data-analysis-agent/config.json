@@ -7,13 +7,17 @@
     "max_tokens": 2048
   },
   "mcp": {
+    "mode": "local",
     "server_path": "../mcp-data-server/main.exe",
     "db_dialect": "sqlite",
     "db_dsn": "./data.db",
     "username": "admin",
     "password": "admin123",
     "mask_enabled": true,
-    "seed_demo": true
+    "seed_demo": true,
+    "base_url": "http://127.0.0.1:9000/mcp",
+    "transport": "streamable-http",
+    "api_key": ""
   },
   "agent": {
     "max_steps": 8,
