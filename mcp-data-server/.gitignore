@@ -1,0 +1,11 @@
+# 编译产物
+mcpd
+mcpd.exe
+
+# 运行时数据库
+*.db
+data.db
+
+# 测试/调试产物
+*.txt
+out/
