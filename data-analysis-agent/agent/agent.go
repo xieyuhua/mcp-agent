@@ -140,6 +140,7 @@ func (a *Agent) ApplyConfig(cfg *config.Config) error {
 	// LLM 配置总是重建（开销小、无副作用）。
 	a.cfg.LLM = cfg.LLM
 	a.llm = llm.NewClient(cfg.LLM.Provider, cfg.LLM.BaseURL, cfg.LLM.Model, cfg.LLM.APIKey, cfg.LLM.Temperature, cfg.LLM.MaxTokens)
+	a.llm.OnLog = a.buildLLMLogCallback()
 	a.cfg.Agent = cfg.Agent
 	a.cfg.Prompts = cfg.Prompts
 	a.cfg.UI = cfg.UI

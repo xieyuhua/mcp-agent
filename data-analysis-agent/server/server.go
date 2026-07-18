@@ -14,6 +14,8 @@ import (
 	"company.com/data-analysis-agent/internal/logger"
 	"company.com/data-analysis-agent/internal/userdb"
 	"company.com/data-analysis-agent/internal/webui"
+
+	"github.com/gin-gonic/gin"
 )
 
 // Server 把数据分析 Agent 暴露为 HTTP 接口，供前端调用。
@@ -22,62 +24,100 @@ type Server struct {
 	users        *userdb.Store // 前端用户体系与多轮会话持久化
 	staticDir    string
 	adminHandler http.Handler // 后台管理（配置 CRUD + 页面）
+	router       *gin.Engine
 }
 
 // New 构造 HTTP Server。staticDir 为前端构建产物目录（可为空，仅提供 API）；
 // adminHandler 为后台管理路由（配置增删改查与页面），可为 nil；
 // users 为用户/会话存储（登录注册与多轮对话）。
 func New(ag *agent.Agent, users *userdb.Store, staticDir string, adminHandler http.Handler) *Server {
-	return &Server{ag: ag, users: users, staticDir: staticDir, adminHandler: adminHandler}
+	s := &Server{ag: ag, users: users, staticDir: staticDir, adminHandler: adminHandler}
+	s.router = s.buildRouter()
+	return s
+}
+
+// buildRouter 配置并返回 Gin 路由引擎。
+func (s *Server) buildRouter() *gin.Engine {
+	gin.SetMode(gin.ReleaseMode)
+	r := gin.New()
+	r.Use(gin.Recovery())
+	r.Use(s.loggingMiddleware())
+	r.Use(s.corsMiddleware())
+
+	api := r.Group("/api")
+	{
+		api.GET("/health", s.handleHealth)
+		api.POST("/ask", s.handleAsk)
+		api.GET("/ui-config", s.handleUIConfig)
+
+		api.POST("/register", s.handleRegister)
+		api.POST("/login", s.handleLogin)
+		api.POST("/logout", s.handleLogout)
+		api.GET("/me", s.handleMe)
+		api.GET("/me/prompt", s.handleUserPrompt)
+		api.POST("/me/prompt", s.handleUserPrompt)
+
+		api.GET("/conversations", s.handleConversations)
+		api.POST("/conversations", s.handleConversations)
+		api.DELETE("/conversations/:id", s.handleConversationDelete)
+		api.PATCH("/conversations/:id", s.handleConversationRename)
+		api.GET("/conversations/:id/messages", s.handleConversationMessages)
+	}
+
+	// 聊天前端页面（自包含，无需前端构建）。
+	r.GET("/ui", s.handleUI)
+	r.GET("/", s.handleUI)
+
+	// 后台管理：API 与页面。
+	if s.adminHandler != nil {
+		r.Any("/api/admin/*path", gin.WrapH(s.adminHandler))
+		r.GET("/admin", gin.WrapH(s.adminHandler))
+		r.GET("/admin/*path", gin.WrapH(s.adminHandler))
+	}
+
+	// 可选的 Vue 构建产物（web/dist）：挂载在 /app/ 前缀下。
+	if s.staticDir != "" {
+		if info, err := os.Stat(s.staticDir); err == nil && info.IsDir() {
+			r.StaticFS("/app/", http.Dir(s.staticDir))
+			r.NoRoute(func(c *gin.Context) {
+				if strings.HasPrefix(c.Request.URL.Path, "/app/") {
+					c.File(filepath.Join(s.staticDir, "index.html"))
+					return
+				}
+				c.Next()
+			})
+		}
+	}
+
+	return r
 }
 
 // Handler 返回配置好路由的 http.Handler。
 func (s *Server) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/health", s.handleHealth)
-	mux.HandleFunc("/api/ask", s.handleAsk)
-	mux.HandleFunc("/api/ui-config", s.handleUIConfig)
-
-	// 用户体系：注册 / 登录 / 登出 / 当前用户 / 用户自定义提示词。
-	mux.HandleFunc("/api/register", s.handleRegister)
-	mux.HandleFunc("/api/login", s.handleLogin)
-	mux.HandleFunc("/api/logout", s.handleLogout)
-	mux.HandleFunc("/api/me", s.handleMe)
-	mux.HandleFunc("/api/me/prompt", s.handleUserPrompt)
-
-	// 多轮会话：列表 / 创建 / 删除 / 消息。
-	mux.HandleFunc("/api/conversations", s.handleConversations)    // GET 列表, POST 新建
-	mux.HandleFunc("/api/conversations/", s.handleConversationSub) // /{id} DELETE, /{id}/messages GET
-
-	// 聊天前端页面（自包含，无需前端构建；精确路径优先于下方静态兜底）。
-	mux.HandleFunc("/ui", s.handleUI)
-	mux.HandleFunc("/", s.handleUI)
-
-	// 后台管理：API 与页面（精确路径优先于下方的静态兜底）。
-	if s.adminHandler != nil {
-		mux.Handle("/api/admin/", s.adminHandler)
-		mux.Handle("/admin", s.adminHandler)
-		mux.Handle("/admin/", s.adminHandler)
-	}
-
-	// 可选的 Vue 构建产物（web/dist）：挂载在 /app/ 前缀下，与内嵌聊天页共存，
-	// 互不冲突。目录不存在则仅提供内嵌页面与 API。
-	if s.staticDir != "" {
-		if info, err := os.Stat(s.staticDir); err == nil && info.IsDir() {
-			fs := http.FileServer(http.Dir(s.staticDir))
-			mux.Handle("/app/", http.StripPrefix("/app/", spaFallback(s.staticDir, fs)))
-		}
-	}
-	return withCORS(loggingMiddleware(mux))
+	return s.router
 }
 
 // loggingMiddleware 记录每个 HTTP 请求（方法/路径/耗时），写入运行日志。
-func loggingMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func (s *Server) loggingMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
 		t0 := time.Now()
-		next.ServeHTTP(w, r)
-		logger.Infof("[http] %s %s 耗时=%s 来自=%s", r.Method, r.URL.Path, time.Since(t0), r.RemoteAddr)
-	})
+		c.Next()
+		logger.Infof("[http] %s %s 耗时=%s 来自=%s", c.Request.Method, c.Request.URL.Path, time.Since(t0), c.ClientIP())
+	}
+}
+
+// corsMiddleware 设置跨域响应头。
+func (s *Server) corsMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Auth-Token")
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(http.StatusNoContent)
+			return
+		}
+		c.Next()
+	}
 }
 
 // Run 启动 HTTP 服务。
@@ -89,7 +129,7 @@ func (s *Server) Run(addr string) error {
 			log.Printf("[server] 已挂载 Vue 构建产物(%s) 于 /app/", s.staticDir)
 		}
 	}
-	return http.ListenAndServe(addr, s.Handler())
+	return s.router.Run(addr)
 }
 
 // askRequest 前端提问请求体。
@@ -105,27 +145,14 @@ type askRequest struct {
 	UserPrompt  string  `json:"user_prompt"`  // 用户自定义提示词；为空表示使用系统后台默认提示词
 }
 
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok"})
-}
-
-// handleModels 返回当前生效的 LLM 配置，供前端"基础设置"初始化。
-func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"error": "仅支持 GET"})
-		return
-	}
-	writeJSON(w, http.StatusOK, s.ag.LLMInfo())
+func (s *Server) handleHealth(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
 // handleUIConfig 返回后台统一配置的前端展示开关（公开接口，无需登录）。
-func (s *Server) handleUIConfig(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"error": "仅支持 GET"})
-		return
-	}
+func (s *Server) handleUIConfig(c *gin.Context) {
 	ui := s.ag.UIConfig()
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	c.JSON(http.StatusOK, gin.H{
 		"show_duration":  ui.ShowDuration,
 		"show_steps":     ui.ShowSteps,
 		"show_images":    ui.ShowImages,
@@ -136,43 +163,33 @@ func (s *Server) handleUIConfig(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"error": "仅支持 POST"})
-		return
-	}
-	user := s.currentUser(r)
+func (s *Server) handleAsk(c *gin.Context) {
+	user := s.currentUser(c)
 	if user == nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{"error": "请先登录"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "请先登录"})
 		return
 	}
 	var req askRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "请求体解析失败: " + err.Error()})
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求体解析失败: " + err.Error()})
 		return
 	}
 	q := strings.TrimSpace(req.Question)
 	if q == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "question 不能为空"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "question 不能为空"})
 		return
 	}
 	logger.Infof("[http] 收到提问: 用户=%s 会话=%s 问题=%s", user.Username, req.ConversationID, logger.Sanitize(q))
 
-	// 解析/创建会话：会话必须归属当前用户。
 	conv, err := s.resolveConversation(user.ID, req.ConversationID, q)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// 读取会话历史作为上下文（多轮记忆），限制最近 N 条避免上下文爆炸。
-	// 历史条数上限从后台配置读取（agent.memory_max_history），不再固定写死。
-	// 历史携带 assistant 的结构化结果（图表/表格/SQL），供记忆层回放。
 	historyLimit := s.ag.MemoryInfo()["max_history"]
 	history := s.loadHistory(user.ID, conv.ID, historyLimit)
 
-	// 组装可选的基础设置覆盖项（空值表示沿用运行配置）。
-	// 若前端未携带用户提示词，则读取数据库中的用户默认提示词。
 	userPrompt := req.UserPrompt
 	if userPrompt == "" {
 		if p, err := s.users.UserPrompt(user.ID); err == nil {
@@ -183,24 +200,21 @@ func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
 	opts.UserID = user.ID
 	opts.ConversationID = conv.ID
 
-	// 流式请求（前端带 Accept: text/event-stream）：边处理边推送 SSE 事件，
-	// 避免长任务下前端长时间无响应，且回答不再因等待整轮完成而被"截断"显示。
-	if r.Header.Get("Accept") == "text/event-stream" {
-		s.handleAskStream(w, r, user, conv, history, q, opts)
+	if c.GetHeader("Accept") == "text/event-stream" {
+		s.handleAskStream(c, user, conv, history, q, opts)
 		return
 	}
 
 	res, aerr := s.ag.AskRichWithHistory(history, q, opts)
 	if aerr != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": aerr.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": aerr.Error()})
 		return
 	}
 
-	// 持久化本轮问答（user + assistant）。assistant 的富结果存入 extra 供回放。
 	s.persistRound(conv.ID, q, res)
 	logger.Infof("[http] 回答完成: 用户=%s 会话=%s 答案长度=%d 步骤数=%d", user.Username, conv.ID, len(res.Answer), len(res.Steps))
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	c.JSON(http.StatusOK, gin.H{
 		"conversation_id": conv.ID,
 		"result":          res,
 	})
@@ -234,34 +248,34 @@ func (s *Server) persistRound(convID, q string, res *agent.AskResult) {
 	_, _ = s.users.AddMessage(convID, "assistant", res.Answer, extra)
 }
 
-// handleAskStream 以 SSE 流式返回 agent 处理过程：先把 conversation_id 发出，
-// 随后按 step/answer/done/error 事件增量推送，最后持久化本轮问答。
-func (s *Server) handleAskStream(w http.ResponseWriter, r *http.Request, user *userdb.User, conv *userdb.Conversation, history []agent.HistoryItem, q string, opts *agent.AskOptions) {
-	flusher, ok := w.(http.Flusher)
+// handleAskStream 以 SSE 流式返回 agent 处理过程。
+func (s *Server) handleAskStream(c *gin.Context, user *userdb.User, conv *userdb.Conversation, history []agent.HistoryItem, q string, opts *agent.AskOptions) {
+	c.Writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	c.Writer.WriteHeaderNow()
+
+	enc := json.NewEncoder(c.Writer)
+	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
-		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": "服务器不支持流式响应"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "服务器不支持流式响应"})
 		return
 	}
-	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-
-	enc := json.NewEncoder(w)
 	send := func(v interface{}) {
 		_ = enc.Encode(v)
 		flusher.Flush()
 	}
-	// 先把会话 ID 告知前端（便于后续消息归属与侧栏同步）。
 	send(map[string]interface{}{"kind": "meta", "conversation_id": conv.ID})
 
-	// 流式事件回调：把 agent 事件转成 SSE 数据帧。
 	streamOpts := &agent.AskOptions{}
 	if opts != nil {
 		streamOpts.Model = opts.Model
 		streamOpts.Temperature = opts.Temperature
 		streamOpts.MaxTokens = opts.MaxTokens
 		streamOpts.UserPrompt = opts.UserPrompt
+		streamOpts.UserID = opts.UserID
+		streamOpts.ConversationID = opts.ConversationID
 		if opts.EnableChart != nil {
 			v := *opts.EnableChart
 			streamOpts.EnableChart = &v
@@ -308,7 +322,6 @@ func (s *Server) handleAskStream(w http.ResponseWriter, r *http.Request, user *u
 		}
 	}
 
-	// 复用带历史的富结果入口（并发安全由 agent 内部 RWMutex 保证）。
 	res, aerr := s.ag.AskRichWithHistory(history, q, streamOpts)
 	if aerr != nil && gotErr == "" {
 		gotErr = aerr.Error()
@@ -316,7 +329,6 @@ func (s *Server) handleAskStream(w http.ResponseWriter, r *http.Request, user *u
 	}
 	finalResult = res
 
-	// 持久化本轮问答（与同步接口一致）。
 	s.persistRound(conv.ID, q, finalResult)
 	send(map[string]interface{}{"kind": "close"})
 }
@@ -333,7 +345,7 @@ func (s *Server) resolveConversation(userID, convID, firstQ string) (*userdb.Con
 	return s.users.CreateConversation(userID, title)
 }
 
-// loadHistory 读取会话最近 limit 条消息，转为 agent 历史格式（含结构化 extra 供记忆层回放）。
+// loadHistory 读取会话最近 limit 条消息，转为 agent 历史格式。
 func (s *Server) loadHistory(userID, convID string, limit int) []agent.HistoryItem {
 	msgs, err := s.users.ListMessages(userID, convID)
 	if err != nil {
@@ -373,9 +385,9 @@ type credRequest struct {
 	Password string `json:"password"`
 }
 
-// currentUser 从请求中解析当前登录用户（Authorization: Bearer 或 X-Auth-Token 或 cookie）。
-func (s *Server) currentUser(r *http.Request) *userdb.User {
-	tok := bearerToken(r)
+// currentUser 从请求中解析当前登录用户。
+func (s *Server) currentUser(c *gin.Context) *userdb.User {
+	tok := bearerToken(c)
 	if tok == "" {
 		return nil
 	}
@@ -386,130 +398,121 @@ func (s *Server) currentUser(r *http.Request) *userdb.User {
 	return u
 }
 
-func bearerToken(r *http.Request) string {
-	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+func bearerToken(c *gin.Context) string {
+	if h := c.GetHeader("Authorization"); strings.HasPrefix(h, "Bearer ") {
 		return strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
 	}
-	if t := r.Header.Get("X-Auth-Token"); t != "" {
+	if t := c.GetHeader("X-Auth-Token"); t != "" {
 		return t
 	}
-	if c, err := r.Cookie("auth_token"); err == nil {
-		return c.Value
+	if cookie, err := c.Cookie("auth_token"); err == nil {
+		return cookie
 	}
 	return ""
 }
 
-func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"error": "仅支持 POST"})
-		return
-	}
+func (s *Server) handleRegister(c *gin.Context) {
 	var req struct {
 		Username string `json:"username"`
 		Phone    string `json:"phone"`
 		Password string `json:"password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "请求体解析失败"})
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求体解析失败"})
 		return
 	}
 	phoneRequired := s.ag.UIConfig().PhoneRequired
 	u, err := s.users.Register(req.Username, req.Phone, req.Password, phoneRequired)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	// 注册后直接登录，返回令牌。
 	_, token, err := s.users.Login(req.Username, req.Password)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	c.JSON(http.StatusOK, gin.H{
 		"token": token,
-		"user":  map[string]interface{}{"id": u.ID, "username": u.Username, "phone": u.Phone},
+		"user":  gin.H{"id": u.ID, "username": u.Username, "phone": u.Phone},
 	})
 }
 
-func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"error": "仅支持 POST"})
-		return
-	}
+func (s *Server) handleLogin(c *gin.Context) {
 	var req credRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "请求体解析失败"})
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求体解析失败"})
 		return
 	}
 	u, token, err := s.users.Login(req.Username, req.Password)
 	if err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{"error": err.Error()})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	c.JSON(http.StatusOK, gin.H{
 		"token": token,
-		"user":  map[string]interface{}{"id": u.ID, "username": u.Username},
+		"user":  gin.H{"id": u.ID, "username": u.Username},
 	})
 }
 
-func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	if err := s.users.Logout(bearerToken(r)); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
+func (s *Server) handleLogout(c *gin.Context) {
+	if err := s.users.Logout(bearerToken(c)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
-func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	u := s.currentUser(r)
+func (s *Server) handleMe(c *gin.Context) {
+	u := s.currentUser(c)
 	if u == nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{"error": "未登录"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "未登录"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"id": u.ID, "username": u.Username, "phone": u.Phone, "role": u.Role})
+	c.JSON(http.StatusOK, gin.H{"id": u.ID, "username": u.Username, "phone": u.Phone, "role": u.Role})
 }
 
 // handleUserPrompt 处理用户自定义提示词：GET 读取，POST 更新。
-func (s *Server) handleUserPrompt(w http.ResponseWriter, r *http.Request) {
-	u := s.currentUser(r)
+func (s *Server) handleUserPrompt(c *gin.Context) {
+	u := s.currentUser(c)
 	if u == nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{"error": "未登录"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "未登录"})
 		return
 	}
-	switch r.Method {
+	switch c.Request.Method {
 	case http.MethodGet:
 		p, _ := s.users.UserPrompt(u.ID)
-		writeJSON(w, http.StatusOK, map[string]interface{}{"prompt": p})
+		c.JSON(http.StatusOK, gin.H{"prompt": p})
 	case http.MethodPost:
 		var body struct {
 			Prompt string `json:"prompt"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "请求体解析失败"})
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "请求体解析失败"})
 			return
 		}
 		if err := s.users.SetUserPrompt(u.ID, body.Prompt); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
+		c.JSON(http.StatusOK, gin.H{"ok": true})
 	default:
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"error": "仅支持 GET/POST"})
+		c.JSON(http.StatusMethodNotAllowed, gin.H{"error": "仅支持 GET/POST"})
 	}
 }
 
 // ---- 多轮会话 ----
 
-func (s *Server) handleConversations(w http.ResponseWriter, r *http.Request) {
-	u := s.currentUser(r)
+func (s *Server) handleConversations(c *gin.Context) {
+	u := s.currentUser(c)
 	if u == nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{"error": "请先登录"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "请先登录"})
 		return
 	}
-	switch r.Method {
+	switch c.Request.Method {
 	case http.MethodGet:
-		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+		limit, _ := strconv.Atoi(c.Query("limit"))
+		offset, _ := strconv.Atoi(c.Query("offset"))
 		defaultLimit := s.ag.UIConfig().ChatPageSize
 		if defaultLimit <= 0 || defaultLimit > 200 {
 			defaultLimit = 50
@@ -522,168 +525,127 @@ func (s *Server) handleConversations(w http.ResponseWriter, r *http.Request) {
 		}
 		list, total, err := s.users.ListConversationsPaginated(u.ID, limit, offset)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]interface{}{
+		c.JSON(http.StatusOK, gin.H{
 			"conversations": list,
 			"total":         total,
 			"limit":         limit,
 			"offset":        offset,
-			"has_more":      int(offset)+len(list) < int(total),
+			"has_more":      offset+len(list) < int(total),
 		})
 	case http.MethodPost:
 		var body struct {
 			Title string `json:"title"`
 		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		c, err := s.users.CreateConversation(u.ID, body.Title)
+		_ = c.ShouldBindJSON(&body)
+		conv, err := s.users.CreateConversation(u.ID, body.Title)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, c)
+		c.JSON(http.StatusOK, conv)
 	default:
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"error": "方法不支持"})
+		c.JSON(http.StatusMethodNotAllowed, gin.H{"error": "方法不支持"})
 	}
 }
 
-// handleConversationSub 处理 /api/conversations/{id} 与 /api/conversations/{id}/messages。
-func (s *Server) handleConversationSub(w http.ResponseWriter, r *http.Request) {
-	u := s.currentUser(r)
+func (s *Server) handleConversationMessages(c *gin.Context) {
+	u := s.currentUser(c)
 	if u == nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{"error": "请先登录"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "请先登录"})
 		return
 	}
-	rest := strings.TrimPrefix(r.URL.Path, "/api/conversations/")
-	parts := strings.Split(strings.Trim(rest, "/"), "/")
-	if len(parts) == 0 || parts[0] == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "缺少会话 ID"})
+	convID := c.Param("id")
+	limit, _ := strconv.Atoi(c.Query("limit"))
+	offset, _ := strconv.Atoi(c.Query("offset"))
+	latest := c.Query("latest") == "true"
+	defaultLimit := s.ag.UIConfig().ChatPageSize
+	if defaultLimit <= 0 || defaultLimit > 200 {
+		defaultLimit = 50
+	}
+	if limit <= 0 || limit > 200 {
+		limit = defaultLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	msgs, total, err := s.users.ListMessagesPaginated(u.ID, convID, limit, offset)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return
 	}
-	convID := parts[0]
 
-	// /{id}/messages -> 获取消息历史（支持分页）
-	if len(parts) >= 2 && parts[1] == "messages" {
-		if r.Method != http.MethodGet {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"error": "方法不支持"})
-			return
+	if latest {
+		actualOffset := 0
+		if int(total) > limit {
+			actualOffset = int(total) - limit
+			actualOffset = (actualOffset / limit) * limit
 		}
-		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
-		latest := r.URL.Query().Get("latest") == "true"
-		defaultLimit := s.ag.UIConfig().ChatPageSize
-		if defaultLimit <= 0 || defaultLimit > 200 {
-			defaultLimit = 50
-		}
-		if limit <= 0 || limit > 200 {
-			limit = defaultLimit
-		}
-		if offset < 0 {
-			offset = 0
-		}
-
-		msgs, total, err := s.users.ListMessagesPaginated(u.ID, convID, limit, offset)
-		if err != nil {
-			writeJSON(w, http.StatusNotFound, map[string]interface{}{"error": err.Error()})
-			return
-		}
-
-		// latest=true 返回最近的 limit 条（用于首次进入会话时直接看最新内容）
-		if latest {
-			actualOffset := 0
-			if int(total) > limit {
-				actualOffset = int(total) - limit
-				// 对齐到页边界，避免重复
-				actualOffset = (actualOffset / limit) * limit
+		if actualOffset != offset {
+			msgs, _, err = s.users.ListMessagesPaginated(u.ID, convID, limit, actualOffset)
+			if err != nil {
+				c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+				return
 			}
-			if actualOffset != offset {
-				msgs, _, err = s.users.ListMessagesPaginated(u.ID, convID, limit, actualOffset)
-				if err != nil {
-					writeJSON(w, http.StatusNotFound, map[string]interface{}{"error": err.Error()})
-					return
-				}
-			}
-			offset = actualOffset
 		}
+		offset = actualOffset
+	}
 
-		hasMore := offset > 0
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"messages": msgs,
-			"total":    total,
-			"limit":    limit,
-			"offset":   offset,
-			"has_more": hasMore,
-		})
+	hasMore := offset > 0
+	c.JSON(http.StatusOK, gin.H{
+		"messages": msgs,
+		"total":    total,
+		"limit":    limit,
+		"offset":   offset,
+		"has_more": hasMore,
+	})
+}
+
+func (s *Server) handleConversationDelete(c *gin.Context) {
+	u := s.currentUser(c)
+	if u == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "请先登录"})
 		return
 	}
-
-	// /{id} -> DELETE 删除 / PATCH 重命名
-	switch r.Method {
-	case http.MethodDelete:
-		if err := s.users.DeleteConversation(u.ID, convID); err != nil {
-			writeJSON(w, http.StatusNotFound, map[string]interface{}{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
-	case http.MethodPatch:
-		var body struct {
-			Title string `json:"title"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		if err := s.users.RenameConversation(u.ID, convID, body.Title); err != nil {
-			writeJSON(w, http.StatusNotFound, map[string]interface{}{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
-	default:
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"error": "方法不支持"})
+	convID := c.Param("id")
+	if err := s.users.DeleteConversation(u.ID, convID); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
 	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (s *Server) handleConversationRename(c *gin.Context) {
+	u := s.currentUser(c)
+	if u == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "请先登录"})
+		return
+	}
+	convID := c.Param("id")
+	var body struct {
+		Title string `json:"title"`
+	}
+	_ = c.ShouldBindJSON(&body)
+	if err := s.users.RenameConversation(u.ID, convID, body.Title); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 // handleUI 返回内嵌的聊天前端页面（自包含，无需前端构建）。
-func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleUI(c *gin.Context) {
 	data, err := webui.Assets.ReadFile("chat.html")
 	if err != nil {
-		http.Error(w, "page not found", http.StatusNotFound)
+		c.String(http.StatusNotFound, "page not found")
 		return
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write(data)
-}
-
-// ---- 中间件 / 工具 ----
-
-func withCORS(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Auth-Token")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-// spaFallback 单页应用回退：未命中的静态路径统一返回 index.html。
-func spaFallback(dir string, fs http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		p := filepath.Join(dir, filepath.Clean(r.URL.Path))
-		if info, err := os.Stat(p); err == nil && !info.IsDir() {
-			fs.ServeHTTP(w, r)
-			return
-		}
-		http.ServeFile(w, r, filepath.Join(dir, "index.html"))
-	})
-}
-
-func writeJSON(w http.ResponseWriter, code int, v interface{}) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(v)
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.Header("Cache-Control", "no-store")
+	c.String(http.StatusOK, string(data))
 }
 
 func normalizeAddr(addr string) string {

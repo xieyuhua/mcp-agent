@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mark3labs/mcp-go/server"
+	mcpserver "github.com/mark3labs/mcp-go/server"
 
 	"company.com/mcp-data-server/config"
 	"company.com/mcp-data-server/internal/admin"
@@ -23,6 +23,8 @@ import (
 	"company.com/mcp-data-server/internal/repository"
 	"company.com/mcp-data-server/internal/service"
 	"company.com/mcp-data-server/internal/web"
+
+	"github.com/gin-gonic/gin"
 )
 
 func main() {
@@ -46,7 +48,6 @@ func main() {
 		}
 	}
 
-	// 组装多层业务组件
 	roleRepo := repository.NewRoleRepo(db)
 	if err := roleRepo.SeedBuiltinRoles("system"); err != nil {
 		log.Printf("warn: seed builtin roles: %v", err)
@@ -56,11 +57,9 @@ func main() {
 	auditSvc := service.NewAuditService(db)
 	queryRepo := repository.NewQueryRepo(db)
 
-	// 权限与脱敏配置 Resolver（从数据库读取，带缓存，可运行时可视化修改）
 	permRepo := repository.NewPermissionRepo(db)
 	authz := auth.NewResolver(permRepo)
 	masker := mask.NewResolver(permRepo)
-	// 启动时预热缓存（平台默认 + 各租户）
 	if err := authz.Refresh(""); err != nil {
 		log.Printf("warn: warm auth cache: %v", err)
 	}
@@ -75,19 +74,17 @@ func main() {
 
 	toolHandler := handler.NewToolHandler(authSvc, querySvc, permSvc, webSvc, weatherSvc, cfg.WorkDir, cfg.SandboxEnabled)
 
-	// 用 mcp-go 构建 MCP 服务，并注册全部业务工具。
-	mcpServer := server.NewMCPServer(
+	mcpServer := mcpserver.NewMCPServer(
 		"mcp-data-server",
 		"1.0.0",
-		server.WithToolCapabilities(true),
-		server.WithRecovery(),
+		mcpserver.WithToolCapabilities(true),
+		mcpserver.WithRecovery(),
 	)
 	handler.RegisterTools(mcpServer, toolHandler)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	// 根据 transport 配置启动对应传输层
 	switch strings.ToLower(cfg.Transport) {
 	case "http":
 		if err := startHTTP(ctx, cfg, mcpServer, authSvc, permSvc); err != nil && ctx.Err() == nil {
@@ -120,9 +117,9 @@ func main() {
 }
 
 // startStdio 启动 stdio 传输，阻塞到 ctx 取消或发生错误。
-func startStdio(ctx context.Context, mcpServer *server.MCPServer) error {
+func startStdio(ctx context.Context, mcpServer *mcpserver.MCPServer) error {
 	log.Println("mcp-data-server started, listening on stdio")
-	s := server.NewStdioServer(mcpServer)
+	s := mcpserver.NewStdioServer(mcpServer)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -131,7 +128,6 @@ func startStdio(ctx context.Context, mcpServer *server.MCPServer) error {
 
 	select {
 	case <-ctx.Done():
-		// 收到 Ctrl+C/SIGTERM 后给 stdio server 最多 2 秒优雅退出
 		select {
 		case err := <-errCh:
 			if err != nil && !errors.Is(err, context.Canceled) {
@@ -149,22 +145,26 @@ func startStdio(ctx context.Context, mcpServer *server.MCPServer) error {
 }
 
 // startHTTP 启动 HTTP 传输（MCP over streamable-http + 权限后台 + 内嵌 Web），阻塞到 ctx 取消。
-func startHTTP(ctx context.Context, cfg *config.Config, mcpServer *server.MCPServer, authSvc *service.AuthService, permSvc *service.PermissionService) error {
+func startHTTP(ctx context.Context, cfg *config.Config, mcpServer *mcpserver.MCPServer, authSvc *service.AuthService, permSvc *service.PermissionService) error {
 	addr := cfg.HTTPAddr
 	if addr == "" {
 		addr = ":8081"
 	}
-	// mcp-go 的 streamable-http 处理器：实现 http.Handler，自动处理 GET(SSE)/POST，并管理会话。
-	httpSrv := server.NewStreamableHTTPServer(mcpServer, server.WithEndpointPath("/mcp"))
+
+	httpSrv := mcpserver.NewStreamableHTTPServer(mcpServer, mcpserver.WithEndpointPath("/mcp"))
 	adminSrv := admin.New(authSvc, permSvc)
 
-	mux := http.NewServeMux()
-	mux.Handle("/mcp", httpSrv)                    // streamable-http（GET 建流 + POST 收发）
-	mux.Handle("/api/admin/", adminSrv.Handler())  // 权限后台 REST API
-	mux.Handle("/", web.StaticHandler(cfg.WebDir)) // 内嵌/外部 Web 页面
+	gin.SetMode(gin.ReleaseMode)
+	r := gin.New()
+	r.Use(gin.Recovery())
+	r.Use(corsMiddleware())
 
-	handler := withCORS(mux)
-	srv := &http.Server{Addr: addr, Handler: handler}
+	r.Any("/mcp", gin.WrapH(httpSrv))
+	r.Any("/api/admin/*path", gin.WrapH(adminSrv.Handler()))
+	r.GET("/", gin.WrapH(web.StaticHandler(cfg.WebDir)))
+	r.NoRoute(gin.WrapH(web.StaticHandler(cfg.WebDir)))
+
+	srv := &http.Server{Addr: addr, Handler: r}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -174,7 +174,6 @@ func startHTTP(ctx context.Context, cfg *config.Config, mcpServer *server.MCPSer
 	log.Printf("mcp-data-server HTTP started: http://%s  (mcp=/mcp, admin=/api/admin, web=/)", normalizeAddr(addr))
 	select {
 	case <-ctx.Done():
-		// 收到 Ctrl+C/SIGTERM 后优雅关闭 HTTP 服务
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
@@ -190,17 +189,17 @@ func startHTTP(ctx context.Context, cfg *config.Config, mcpServer *server.MCPSer
 	}
 }
 
-func withCORS(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
+func corsMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id")
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(http.StatusNoContent)
 			return
 		}
-		next.ServeHTTP(w, r)
-	})
+		c.Next()
+	}
 }
 
 func normalizeAddr(addr string) string {
