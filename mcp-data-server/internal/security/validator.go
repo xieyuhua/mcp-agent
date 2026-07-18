@@ -20,6 +20,11 @@ var identRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 // ValidateSQL 校验原生 SQL：仅允许 SELECT，拦截危险关键字与多语句。
 func ValidateSQL(sql string) error {
 	s := strings.TrimSpace(sql)
+	// 去除末尾多余分号（LLM 常生成 SELECT ...; 这种单语句）。
+	// 保留对多语句（分号出现在中间）的拦截，例如 SELECT ...; DROP ... 仍会被拒绝。
+	for strings.HasSuffix(s, ";") {
+		s = strings.TrimSpace(strings.TrimSuffix(s, ";"))
+	}
 	if s == "" {
 		return fmt.Errorf("empty sql")
 	}

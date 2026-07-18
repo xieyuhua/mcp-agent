@@ -60,7 +60,6 @@ func (a *Agent) initMCP(cfg *config.Config) error {
 	if strings.EqualFold(cfg.MCP.Mode, "remote") {
 		// 远程 MCP 服务对接（无需本地子进程）
 		builtin = false
-		fmt.Printf("[agent] 使用远程 MCP 对接: %s (transport=%s)\n", cfg.MCP.BaseURL, transportName(cfg.MCP.Transport))
 		logger.Infof("[agent] 使用远程 MCP 对接: %s (transport=%s)", cfg.MCP.BaseURL, transportName(cfg.MCP.Transport))
 		mcp, err = mcpclient.StartRemote(mcpclient.RemoteConfig{
 			BaseURL:   cfg.MCP.BaseURL,
@@ -72,7 +71,6 @@ func (a *Agent) initMCP(cfg *config.Config) error {
 	} else {
 		// 本地内置 mcp-data-server 子进程
 		builtin = true
-		fmt.Printf("[agent] 使用本地内置 MCP 对接: %s\n", cfg.MCP.ServerPath)
 		logger.Infof("[agent] 使用本地内置 MCP 对接: %s", cfg.MCP.ServerPath)
 		mcp, err = mcpclient.Start(mcpclient.StartConfig{
 			ServerPath:     cfg.MCP.ServerPath,
@@ -218,7 +216,6 @@ func (a *Agent) login() error {
 		return fmt.Errorf("empty token from auth_login (raw: %s)", text)
 	}
 	a.token = res.Token
-	fmt.Printf("[agent] 已以账号 %s 登录，角色=%s，token 已就绪\n", a.cfg.MCP.Username, res.Role)
 	logger.Infof("[agent] MCP 登录成功: 账号=%s 角色=%s", a.cfg.MCP.Username, res.Role)
 	return nil
 }
@@ -248,12 +245,14 @@ func (a *Agent) connectExtraMCPs(cfg *config.Config) {
 			Timeout:   30 * time.Second,
 		})
 		if err != nil {
-			fmt.Printf("[agent] 额外 MCP [%s] 连接失败（已跳过）: %v\n", name, err)
-		logger.Warnf("[agent] 额外 MCP [%s] 连接失败（已跳过）: %v", name, err)
+			logger.Warnf("[agent] 额外 MCP [%s] 连接失败（已跳过）: %v", name, err)
 			continue
 		}
-		fmt.Printf("[agent] 已对接额外 MCP [%s]: %s，发现 %d 个工具\n", name, m.BaseURL, len(cli.Tools()))
-		logger.Infof("[agent] 已对接额外 MCP [%s]: %s，发现 %d 个工具", name, m.BaseURL, len(cli.Tools()))
+		logger.Infof("[agent] 已对接额外 MCP [%s]: %s，发现 %d 个工具: %s", name, m.BaseURL, len(cli.Tools()), func() string {
+			names := make([]string, 0, len(cli.Tools()))
+			for _, t := range cli.Tools() { names = append(names, t.Name) }
+			return strings.Join(names, ", ")
+		}())
 		a.extraMCPs = append(a.extraMCPs, &extraMCP{name: name, client: cli})
 	}
 }
@@ -267,13 +266,19 @@ func (a *Agent) buildTools() []llm.Tool {
 	if a.builtin {
 		tools = append(tools, a.localDataTools()...)
 	} else {
-		for _, t := range a.mcp.Tools() {
+		remoteTools := a.mcp.Tools()
+		for _, t := range remoteTools {
 			tools = append(tools, llm.Tool{
 				Name:        t.Name,
 				Description: t.Description,
 				Parameters:  t.InputSchema,
 			})
 		}
+		logger.Infof("[agent] 远程 MCP 主服务返回 %d 个工具: %s", len(remoteTools), func() string {
+			names := make([]string, 0, len(remoteTools))
+			for _, t := range remoteTools { names = append(names, t.Name) }
+			return strings.Join(names, ", ")
+		}())
 	}
 
 	// 聚合额外 MCP 工具并记录路由（同名工具以先注册者为准，跳过冲突）。
@@ -285,7 +290,7 @@ func (a *Agent) buildTools() []llm.Tool {
 	for _, em := range a.extraMCPs {
 		for _, t := range em.client.Tools() {
 			if existing[t.Name] {
-				fmt.Printf("[agent] 额外 MCP [%s] 的工具 %s 与已有工具重名，已跳过\n", em.name, t.Name)
+				logger.Warnf("[agent] 额外 MCP [%s] 的工具 %s 与已有工具重名，已跳过", em.name, t.Name)
 				continue
 			}
 			existing[t.Name] = true
@@ -299,7 +304,17 @@ func (a *Agent) buildTools() []llm.Tool {
 	}
 	// 构建「工具名 -> 执行函数」注册表，供 executeTool 按名分发。
 	a.toolRegistry = a.buildRegistry(tools)
+	logger.Infof("[agent] 已加载 %d 个工具供 LLM 使用: %s", len(tools), toolNames(tools))
 	return tools
+}
+
+// toolNames 返回工具列表的名称串（用于日志）。
+func toolNames(tools []llm.Tool) string {
+	names := make([]string, 0, len(tools))
+	for _, t := range tools {
+		names = append(names, t.Name)
+	}
+	return strings.Join(names, ", ")
 }
 
 // localDataTools 本地内置 mcp-data-server 的数据库分析工具（带中文描述与映射）。
@@ -739,8 +754,7 @@ func (a *Agent) AskRichWithHistory(history []HistoryItem, question string, opts 
 
 		// 执行所有工具调用，结果作为 tool 消息回灌
 		for _, tc := range resp.ToolCalls {
-			fmt.Printf("[agent] 模型请求调用工具: %s 参数=%s\n", tc.Name, tc.Arguments)
-			logger.Infof("[agent] 工具调用请求: %s 参数=%s", tc.Name, logger.Sanitize(tc.Arguments))
+			logger.Infof("[agent] 模型请求调用工具: %s 参数=%s", tc.Name, logger.Sanitize(tc.Arguments))
 			// 工具调用开始：先推送“调用中”事件，让前端在工具执行期间（可能较久）有持续反馈，避免像卡死。
 			onEvent(StreamEvent{Kind: EventStepStart, Step: &StepLog{Tool: tc.Name, Args: tc.Arguments}})
 
@@ -787,8 +801,7 @@ func (a *Agent) AskRichWithHistory(history []HistoryItem, question string, opts 
 				}
 			}
 
-			fmt.Printf("[agent] 工具返回(完整, 仅日志截断显示): %s\n", truncate(toolResult, 200))
-			logger.Infof("[agent] 工具返回: %s 结果(前200)=%s", tc.Name, logger.Sanitize(truncate(toolResult, 200)))
+			logger.Infof("[agent] 工具返回(前200): %s 结果=%s", tc.Name, logger.Sanitize(truncate(toolResult, 200)))
 			// 展示用步骤日志：保留完整结果，前端“分析过程”不再截断。
 			// 喂给 LLM 上下文的则在下方 messages 中用 truncateResult 按行数裁剪，防止上下文膨胀。
 			stepLog := StepLog{Tool: tc.Name, Args: tc.Arguments, Result: toolResult}

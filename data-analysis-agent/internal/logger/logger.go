@@ -15,16 +15,42 @@ import (
 
 // Logger 带时间戳的日志器，可同时写控制台与文件。
 type Logger struct {
-	mu        sync.Mutex
+	mu         sync.Mutex
+	level      Level
 	saveToFile bool
-	dir       string
-	file      *os.File // 当前打开的日志文件（按天）
-	date      string   // 当前文件对应的日期串，用于按天滚动
-	console   io.Writer
+	dir        string
+	file       *os.File // 当前打开的日志文件（按天）
+	date       string   // 当前文件对应的日期串，用于按天滚动
+	console    io.Writer
 }
 
 // 全局单例。
-var std = &Logger{console: os.Stderr}
+var std = &Logger{console: os.Stderr, level: InfoLevel}
+
+// Level 日志级别。
+type Level int
+
+const (
+	DebugLevel Level = iota
+	InfoLevel
+	WarnLevel
+	ErrorLevel
+)
+
+func (l Level) String() string {
+	switch l {
+	case DebugLevel:
+		return "DEBUG"
+	case InfoLevel:
+		return "INFO"
+	case WarnLevel:
+		return "WARN"
+	case ErrorLevel:
+		return "ERROR"
+	default:
+		return "INFO"
+	}
+}
 
 // Init 初始化全局日志器：根据 saveToFile 决定是否写文件，dir 为日志目录（空则用 ./logs）。
 func Init(saveToFile bool, dir string) {
@@ -45,6 +71,20 @@ func Init(saveToFile bool, dir string) {
 		_ = os.MkdirAll(dir, 0o755)
 		_ = std.rotateLocked()
 	}
+}
+
+// SetLevel 运行时热更新日志级别。
+func SetLevel(level Level) {
+	std.mu.Lock()
+	defer std.mu.Unlock()
+	std.level = level
+}
+
+// GetLevel 返回当前日志级别。
+func GetLevel() Level {
+	std.mu.Lock()
+	defer std.mu.Unlock()
+	return std.level
 }
 
 // SetSaveToFile 运行时热更新是否写文件（不重启进程）。
@@ -98,12 +138,15 @@ func (l *Logger) rotateLocked() error {
 }
 
 // logf 输出一条带时间戳与级别的日志。
-func logf(level, format string, args ...interface{}) {
+func logf(lvl Level, format string, args ...interface{}) {
+	std.mu.Lock()
+	defer std.mu.Unlock()
+	if lvl < std.level {
+		return
+	}
 	now := time.Now().Format("2006-01-02 15:04:05.000")
 	msg := fmt.Sprintf(format, args...)
-	line := fmt.Sprintf("[%s] %s %s\n", now, level, msg)
-
-	std.mu.Lock()
+	line := fmt.Sprintf("[%s] %s %s\n", now, lvl.String(), msg)
 	// 控制台
 	fmt.Fprint(std.console, line)
 	// 文件
@@ -112,20 +155,19 @@ func logf(level, format string, args ...interface{}) {
 			std.file.WriteString(line)
 		}
 	}
-	std.mu.Unlock()
 }
 
 // Infof 信息级日志（带时间戳）。
-func Infof(format string, args ...interface{}) { logf("INFO ", format, args...) }
+func Infof(format string, args ...interface{}) { logf(InfoLevel, format, args...) }
 
 // Warnf 告警级日志（带时间戳）。
-func Warnf(format string, args ...interface{}) { logf("WARN ", format, args...) }
+func Warnf(format string, args ...interface{}) { logf(WarnLevel, format, args...) }
 
 // Errorf 错误级日志（带时间戳）。
-func Errorf(format string, args ...interface{}) { logf("ERROR", format, args...) }
+func Errorf(format string, args ...interface{}) { logf(ErrorLevel, format, args...) }
 
 // Debugf 调试级日志（带时间戳）。
-func Debugf(format string, args ...interface{}) { logf("DEBUG", format, args...) }
+func Debugf(format string, args ...interface{}) { logf(DebugLevel, format, args...) }
 
 // Sanitize 去除可能含敏感信息的换行，便于单行记录。
 func Sanitize(s string) string {

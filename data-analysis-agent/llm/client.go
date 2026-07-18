@@ -68,6 +68,7 @@ func NewClient(provider, baseURL, model, apiKey string, temperature float64, max
 
 // Chat 发起一轮对话，tools 为空表示纯对话。
 func (c *Client) Chat(messages []Message, tools []Tool) (*Response, error) {
+	logger.Debugf("[llm] 发起对话请求: messages=%d tools=%d(%s) 当前问题=%q", len(messages), len(tools), toolNames(tools), lastUserQuestion(messages))
 	if len(tools) == 0 {
 		return c.chatNoTools(messages)
 	}
@@ -75,6 +76,23 @@ func (c *Client) Chat(messages []Message, tools []Tool) (*Response, error) {
 		return c.chatOpenAI(messages, tools)
 	}
 	return c.chatOllama(messages, tools)
+}
+
+// lastUserQuestion 返回 messages 中最后一条 user 消息的内容，便于日志追踪自然语言输入。
+func lastUserQuestion(messages []Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			return logger.Sanitize(messages[i].Content)
+		}
+	}
+	return ""
+}
+
+// toolNames 返回工具名称列表串，用于日志。
+func toolNames(tools []Tool) string {
+	names := make([]string, 0, len(tools))
+	for _, t := range tools { names = append(names, t.Name) }
+	return strings.Join(names, ", ")
 }
 
 // ---- Ollama ----
@@ -319,6 +337,7 @@ func (c *Client) chatNoTools(messages []Message) (*Response, error) {
 // 最终仍返回完整的 Response（含全部内容与工具调用）。用于 Web/CLI 的逐字流式回答。
 // 当 onToken 为 nil 时退化为静默（等价于非流式，但仍逐行读取响应）。
 func (c *Client) ChatStream(messages []Message, tools []Tool, onToken func(string)) (*Response, error) {
+	logger.Debugf("[llm] 发起流式对话请求: messages=%d tools=%d(%s) 当前问题=%q", len(messages), len(tools), toolNames(tools), lastUserQuestion(messages))
 	if onToken == nil {
 		onToken = func(string) {}
 	}

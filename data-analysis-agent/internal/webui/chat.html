@@ -110,10 +110,7 @@
   .send:active { transform: scale(.97); }
   .send:disabled { opacity: 0.5; cursor: not-allowed; }
   .typing { display: inline-flex; align-items: center; gap: 8px; }
-  .typing .dots { display: inline-flex; gap: 4px; }
-  .typing i { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: blink 1.2s infinite ease-in-out; }
-  .typing i:nth-child(2) { animation-delay: 0.2s; }
-  .typing i:nth-child(3) { animation-delay: 0.4s; }
+  .typing .spin { width: 14px; height: 14px; border: 2px solid var(--accent); border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; }
   .typing .thinking-text { font-size: 13px; color: var(--text-dim); }
   @keyframes blink { 0%, 80%, 100% { opacity: 0.2; } 40% { opacity: 1; } }
   .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: none; z-index: 20; }
@@ -153,8 +150,13 @@
   .conv-item:hover { background: var(--panel-2); color: var(--text); }
   .conv-item.active { background: var(--panel-2); color: var(--text); border: 1px solid var(--accent); box-shadow: 0 2px 10px rgba(79,140,255,0.12); }
   .conv-item .ct { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .conv-item .del { opacity: 0; background: transparent; border: none; color: var(--err); cursor: pointer; font-size: 13px; transition: opacity .15s; }
+  .conv-item .del { opacity: 0; background: transparent; border: none; color: var(--err); cursor: pointer; font-size: 13px; transition: opacity .15s; padding: 2px 6px; border-radius: 6px; }
   .conv-item:hover .del { opacity: 1; }
+  .conv-item .del:hover { background: rgba(255,107,107,0.15); }
+  /* 触摸设备无 hover，默认显示删除按钮避免找不到入口 */
+  @media (hover: none) and (pointer: coarse) {
+    .conv-item .del { opacity: 1; }
+  }
   .sidebar .sb-foot { padding: 12px 14px; border-top: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; }
   .sidebar .sb-foot .uname { color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .main { flex: 1; min-width: 0; }
@@ -450,6 +452,9 @@
     loadMessages(id);
   }
   function deleteConv(id) {
+    var title = "";
+    for (var i = 0; i < convs.length; i++) { if (convs[i].id === id) { title = convs[i].title || "新对话"; break; } }
+    if (!confirm('确定删除会话「' + title + '」吗？\n删除后不可恢复。')) return;
     api("/api/conversations/" + id, { method: "DELETE" }).then(function () {
       if (currentConv === id) { currentConv = ""; resetChat(); }
       loadConversations();
@@ -497,6 +502,15 @@
   document.getElementById("logoutBtn").onclick = function () { logout(false); };
   document.getElementById("newConvBtn").onclick = newConv;
   menuBtn.onclick = function () { sidebarEl.classList.toggle("show"); };
+
+  // 移动端：左菜单弹出后，点击主内容空白区域关闭侧栏。
+  document.addEventListener("click", function (e) {
+    if (window.innerWidth > 600) return;
+    if (!sidebarEl.classList.contains("show")) return;
+    if (sidebarEl.contains(e.target)) return;
+    if (menuBtn.contains(e.target)) return;
+    sidebarEl.classList.remove("show");
+  });
 
   // 启动：检查已有登录态
   if (token) {
@@ -791,8 +805,9 @@
     chatEl.appendChild(row); scrollBottom();
   }
   function addTyping() {
+    if (document.getElementById("typing")) return; // 已在思考中则避免重复
     var row = document.createElement("div"); row.className = "row assistant"; row.id = "typing";
-    row.innerHTML = '<div class="avatar">AI</div><div class="bubble"><span class="typing"><span class="dots"><i></i><i></i><i></i></span><span class="thinking-text">思考中…</span></span></div>';
+    row.innerHTML = '<div class="avatar">AI</div><div class="bubble"><span class="typing"><span class="spin"></span><span class="thinking-text">思考中…</span></span></div>';
     chatEl.appendChild(row); scrollBottom();
   }
   function removeTyping() { var t = document.getElementById("typing"); if (t) t.remove(); }
@@ -901,6 +916,10 @@
           if (ev.kind === "meta") {
             convId = ev.conversation_id;
             if (convId && convId !== currentConv) { currentConv = convId; loadConversations(); }
+          } else if (ev.kind === "thinking") {
+            // LLM 正在思考：保持“思考中”指示，避免像卡死；
+            // 若已被真实事件清掉，则重新显示（多轮/多次思考场景）。
+            addTyping();
           } else if (ev.kind === "step_start") {
             // 工具调用开始：展示"调用中"卡片（含 spinner），持续显示直到对应 step 完成，避免执行期间像卡死。
             removeTyping();   // 首个真实事件到达，移除"思考中"

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"company.com/data-analysis-agent/agent"
 	"company.com/data-analysis-agent/config"
@@ -25,6 +27,9 @@ func main() {
 	temperature := flag.Float64("temperature", 0, "覆盖生成温度（0 表示沿用配置）")
 	maxTokens := flag.Int("max-tokens", 0, "覆盖单次生成上限（0 表示沿用配置）")
 	serve := flag.Bool("serve", false, "启动 HTTP 服务模式（供 Vue 前端调用）")
+	logFile := flag.Bool("log-file", false, "CLI 模式下是否把请求日志保存到文件（默认 false）")
+	verbose := flag.Bool("v", false, "CLI 模式下打印 Info 级日志（默认只显示 Warn/Error）")
+	debug := flag.Bool("vv", false, "CLI 模式下打印 Debug 级日志（含完整 prompt/tools 等）")
 	addr := flag.String("addr", ":8088", "HTTP 监听地址")
 	staticDir := flag.String("static", "web/dist", "前端静态资源目录（前端 build 产物）")
 	flag.Parse()
@@ -51,6 +56,17 @@ func main() {
 	}
 
 	// 初始化运行日志：根据配置决定是否把每个环节的请求日志保存到文件（带时间戳）。
+	// CLI 交互模式下默认不写文件，避免每次问答都生成日志文件；可通过 -log-file 显式开启。
+	// 同时 CLI 默认只显示 Warn/Error 级日志，避免每次问答都输出大量“建立连接”类 Info 日志。
+	if !*serve && !*logFile {
+		effCfg.Log.SaveToFile = false
+	}
+	if !*serve && !*verbose && !*debug {
+		logger.SetLevel(logger.WarnLevel)
+	}
+	if !*serve && *debug {
+		logger.SetLevel(logger.DebugLevel)
+	}
 	logger.Init(effCfg.Log.SaveToFile, effCfg.Log.Dir)
 	logger.Infof("[main] 启动数据分析助手 (LLM=%s/%s)", effCfg.LLM.Provider, effCfg.LLM.Model)
 
@@ -137,27 +153,58 @@ func main() {
 }
 
 // cliAsk 以流式方式处理一次提问：实时打印工具步骤与逐字回答，返回最终文本。
-// 关键点：LLM 思考阶段（尚未产出任何 token / 工具调用）会显示“思考中…”提示，
+// 关键点：LLM 思考阶段（尚未产出任何 token / 工具调用）会显示“思考中…”动态 spinner，
 // 工具执行期间实时刷新进度，避免用户误以为卡死。
 func cliAsk(ag *agent.Agent, q string, base *agent.AskOptions) (string, error) {
 	fmt.Printf("\n助手> ")
 	gotDelta := false
-	// thinking 标记当前是否处于“思考中”提示态（已打印但未清除）。
+	// thinking 标记当前是否处于“思考中”提示态（spinner 正在运行）。
 	thinking := false
-	// clearThinking 清除“思考中”提示行（用回车覆盖），避免与后续内容重叠。
+	var spinnerStop chan struct{}
+	var spinnerWG sync.WaitGroup
+
+	// clearThinking 停止 spinner 并清空思考行。
 	clearThinking := func() {
 		if thinking {
+			if spinnerStop != nil {
+				close(spinnerStop)
+				spinnerStop = nil
+			}
+			spinnerWG.Wait()
 			fmt.Print("\r\033[K") // 回到行首并清空整行
 			thinking = false
 		}
 	}
+
+	// startSpinner 在控制台同一行循环播放旋转字符，营造“思考中”动效。
+	startSpinner := func() {
+		spinnerStop = make(chan struct{})
+		spinnerWG.Add(1)
+		go func() {
+			defer spinnerWG.Done()
+			frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+			i := 0
+			ticker := time.NewTicker(100 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					fmt.Printf("\r  🤔 思考中 %s\033[K", frames[i%len(frames)])
+					i++
+				case <-spinnerStop:
+					return
+				}
+			}
+		}()
+	}
+
 	onEvent := func(ev agent.StreamEvent) {
 		switch ev.Kind {
 		case agent.EventThinking:
-			// LLM 思考阶段开始：显示“思考中…”（若本就已在显示则保持）。
+			// LLM 思考阶段开始：启动动态 spinner（若已运行则保持）。
 			if !thinking {
-				fmt.Print("\r  🤔 思考中…\033[K")
 				thinking = true
+				startSpinner()
 			}
 		case agent.EventStepStart:
 			// 工具调用一发起就打印工具名与参数（流式：分析过程先出），执行期间不再像卡死。

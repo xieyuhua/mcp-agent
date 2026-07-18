@@ -235,11 +235,17 @@ func (s *Server) handleAskStream(w http.ResponseWriter, r *http.Request, user *u
 		streamOpts.Model = opts.Model
 		streamOpts.Temperature = opts.Temperature
 		streamOpts.MaxTokens = opts.MaxTokens
+		if opts.EnableChart != nil {
+			v := *opts.EnableChart
+			streamOpts.EnableChart = &v
+		}
 	}
 	var finalResult *agent.AskResult
 	var gotErr string
 	streamOpts.OnEvent = func(ev agent.StreamEvent) {
 		switch ev.Kind {
+		case agent.EventThinking:
+			send(map[string]interface{}{"kind": "thinking"})
 		case agent.EventStepStart:
 			send(map[string]interface{}{"kind": "step_start", "step": ev.Step})
 		case agent.EventStepProgress:
