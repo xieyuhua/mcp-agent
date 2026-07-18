@@ -52,7 +52,17 @@ function buildOption(spec) {
     }
   }
 
-  // bar / line
+  // bar / line：当恰好两条 series 时，给第二条 series 分配右侧 Y 轴，避免不同量纲被压扁。
+  const dualAxis = (spec.series || []).length === 2
+  const seriesOpt = (spec.series || []).map((s, i) => ({
+    name: s.name,
+    type: spec.type === 'line' ? 'line' : 'bar',
+    data: s.data,
+    smooth: spec.type === 'line',
+    barMaxWidth: 42,
+    areaStyle: spec.type === 'line' ? { opacity: 0.08 } : undefined,
+    yAxisIndex: dualAxis ? i : 0
+  }))
   return {
     ...base,
     xAxis: {
@@ -61,19 +71,17 @@ function buildOption(spec) {
       axisLabel: { color: '#9aa3b2' },
       axisLine: { lineStyle: { color: '#2a2f3a' } }
     },
-    yAxis: {
-      type: 'value',
-      axisLabel: { color: '#9aa3b2' },
-      splitLine: { lineStyle: { color: '#232833' } }
-    },
-    series: (spec.series || []).map((s) => ({
-      name: s.name,
-      type: spec.type === 'line' ? 'line' : 'bar',
-      data: s.data,
-      smooth: spec.type === 'line',
-      barMaxWidth: 42,
-      areaStyle: spec.type === 'line' ? { opacity: 0.08 } : undefined
-    }))
+    yAxis: dualAxis
+      ? [
+          { type: 'value', axisLabel: { color: '#9aa3b2' }, splitLine: { lineStyle: { color: '#232833' } } },
+          { type: 'value', axisLabel: { color: '#9aa3b2' }, splitLine: { show: false } }
+        ]
+      : {
+          type: 'value',
+          axisLabel: { color: '#9aa3b2' },
+          splitLine: { lineStyle: { color: '#232833' } }
+        },
+    series: seriesOpt
   }
 }
 

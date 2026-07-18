@@ -226,7 +226,7 @@ func RegisterTools(s *server.MCPServer, h *ToolHandler) {
 	// --- 联网查询工具 ---
 	s.AddTool(
 		mcp.NewTool("web_search",
-			mcp.WithDescription("联网搜索（基于 DuckDuckGo，无需 API key）。返回相关网页的标题、链接与摘要，用于获取实时/外部信息。"),
+			mcp.WithDescription("联网搜索（无需 API key；默认 DuckDuckGo，后台可配置为 Bing 或自动回退）。返回相关网页的标题、链接与摘要，用于获取实时/外部信息。"),
 			mcp.WithString("token", mcp.Required(), mcp.Description("登录令牌")),
 			mcp.WithString("query", mcp.Required(), mcp.Description("搜索关键词，如「2024 年中国 GDP 增速」")),
 			mcp.WithNumber("limit", mcp.Description("返回结果条数，默认5，最大10")),
@@ -245,6 +245,18 @@ func RegisterTools(s *server.MCPServer, h *ToolHandler) {
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			return toolResult(h.webFetch(ctx, req.GetArguments(), makeProgressSender(s, ctx))), nil
+		},
+	)
+
+	// --- 天气查询 ---
+	s.AddTool(
+		mcp.NewTool("query_weather",
+			mcp.WithDescription("查询指定城市的实时天气（温度、体感温度、天气状况、湿度、气压、风速）。当用户询问天气、气温、穿什么衣服、是否下雨等问题时使用，例如「北京天气怎么样」「重庆现在多少度」。"),
+			mcp.WithString("token", mcp.Required(), mcp.Description("登录令牌")),
+			mcp.WithString("location", mcp.Required(), mcp.Description("城市名，如 北京、重庆、上海、Chongqing")),
+		),
+		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return toolResult(h.queryWeather(ctx, req.GetArguments(), makeProgressSender(s, ctx))), nil
 		},
 	)
 }

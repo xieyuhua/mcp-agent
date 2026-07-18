@@ -40,6 +40,7 @@ type Tool struct {
 type Response struct {
 	Content   string
 	ToolCalls []ToolCall
+	Duration  time.Duration // 本次请求从发送到接收完成的耗时
 }
 
 // Client 本地大模型客户端，兼容 Ollama 与 OpenAI 风格 chat 接口。
@@ -51,6 +52,9 @@ type Client struct {
 	temperature float64
 	maxTokens   int
 	http        *http.Client
+
+	// OnLog 调用日志回调，参数为 (logCtx, requestInfo, responseText, duration, errorMsg)。
+	OnLog func(logCtx *LogContext, reqInfo map[string]interface{}, respText string, duration time.Duration, errMsg string)
 }
 
 // NewClient 构造客户端。
@@ -66,16 +70,37 @@ func NewClient(provider, baseURL, model, apiKey string, temperature float64, max
 	}
 }
 
-// Chat 发起一轮对话，tools 为空表示纯对话。
-func (c *Client) Chat(messages []Message, tools []Tool) (*Response, error) {
+// LogContext 调用日志上下文。
+type LogContext struct {
+	UserID         string
+	ConversationID string
+}
+
+// Chat 发起一轮对话，tools 为空表示纯对话（不记录调用日志）。
+func (c *Client) Chat(messages []Message, tools []Tool) (resp *Response, err error) {
+	return c.ChatWithLog(messages, tools, nil)
+}
+
+// ChatWithLog 发起一轮对话并记录调用日志（logCtx 非 nil 时）。
+func (c *Client) ChatWithLog(messages []Message, tools []Tool, logCtx *LogContext) (resp *Response, err error) {
 	logger.Debugf("[llm] 发起对话请求: messages=%d tools=%d(%s) 当前问题=%q", len(messages), len(tools), toolNames(tools), lastUserQuestion(messages))
+	t0 := time.Now()
+	defer func() {
+		if resp != nil {
+			resp.Duration = time.Since(t0)
+		}
+		c.logCall(logCtx, messages, tools, resp, time.Since(t0), err)
+	}()
 	if len(tools) == 0 {
-		return c.chatNoTools(messages)
+		resp, err = c.chatNoTools(messages)
+		return
 	}
 	if c.provider == "openai" {
-		return c.chatOpenAI(messages, tools)
+		resp, err = c.chatOpenAI(messages, tools)
+		return
 	}
-	return c.chatOllama(messages, tools)
+	resp, err = c.chatOllama(messages, tools)
+	return
 }
 
 // lastUserQuestion 返回 messages 中最后一条 user 消息的内容，便于日志追踪自然语言输入。
@@ -333,22 +358,58 @@ func (c *Client) chatNoTools(messages []Message) (*Response, error) {
 	return &Response{Content: out.Message.Content}, nil
 }
 
-// ChatStream 同 Chat，但开启流式输出：每产生一个文本增量就通过 onToken 回调（不可为 nil），
-// 最终仍返回完整的 Response（含全部内容与工具调用）。用于 Web/CLI 的逐字流式回答。
-// 当 onToken 为 nil 时退化为静默（等价于非流式，但仍逐行读取响应）。
-func (c *Client) ChatStream(messages []Message, tools []Tool, onToken func(string)) (*Response, error) {
+// ChatStream 同 Chat，但开启流式输出（不记录调用日志）。
+func (c *Client) ChatStream(messages []Message, tools []Tool, onToken func(string)) (resp *Response, err error) {
+	return c.ChatStreamWithLog(messages, tools, onToken, nil)
+}
+
+// ChatStreamWithLog 流式对话并记录调用日志。
+func (c *Client) ChatStreamWithLog(messages []Message, tools []Tool, onToken func(string), logCtx *LogContext) (resp *Response, err error) {
 	logger.Debugf("[llm] 发起流式对话请求: messages=%d tools=%d(%s) 当前问题=%q", len(messages), len(tools), toolNames(tools), lastUserQuestion(messages))
+	t0 := time.Now()
+	defer func() {
+		if resp != nil {
+			resp.Duration = time.Since(t0)
+		}
+		c.logCall(logCtx, messages, tools, resp, time.Since(t0), err)
+	}()
 	if onToken == nil {
 		onToken = func(string) {}
 	}
 	if len(tools) == 0 {
-		return c.chatStreamNoTools(messages, onToken)
+		resp, err = c.chatStreamNoTools(messages, onToken)
+		return
 	}
 	if c.provider == "openai" {
-		return c.chatStreamOpenAI(messages, tools, onToken)
+		resp, err = c.chatStreamOpenAI(messages, tools, onToken)
+		return
 	}
-	return c.chatStreamOllama(messages, tools, onToken)
+	resp, err = c.chatStreamOllama(messages, tools, onToken)
+	return
 }
+
+// logCall 触发调用日志回调。
+func (c *Client) logCall(logCtx *LogContext, messages []Message, tools []Tool, resp *Response, duration time.Duration, err error) {
+	if c.OnLog == nil || logCtx == nil {
+		return
+	}
+	reqInfo := map[string]interface{}{
+		"provider": c.provider,
+		"model":    c.model,
+		"messages": messages,
+		"tools":    tools,
+	}
+	respText := ""
+	if resp != nil {
+		respText = resp.Content
+	}
+	errMsg := ""
+	if err != nil {
+		errMsg = err.Error()
+	}
+	c.OnLog(logCtx, reqInfo, respText, duration, errMsg)
+}
+
 
 // ---- 流式底层：发起请求并返回响应体（由调用方逐行读取）----
 

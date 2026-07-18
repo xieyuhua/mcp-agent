@@ -2,13 +2,16 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/mark3labs/mcp-go/server"
 
@@ -44,6 +47,11 @@ func main() {
 	}
 
 	// 组装多层业务组件
+	roleRepo := repository.NewRoleRepo(db)
+	if err := roleRepo.SeedBuiltinRoles("system"); err != nil {
+		log.Printf("warn: seed builtin roles: %v", err)
+	}
+
 	authSvc := service.NewAuthService(db, cfg.JWTSecret)
 	auditSvc := service.NewAuditService(db)
 	queryRepo := repository.NewQueryRepo(db)
@@ -61,10 +69,11 @@ func main() {
 	}
 
 	querySvc := service.NewQueryService(queryRepo, auditSvc, authz, masker, cfg.MaskEnabled)
-	permSvc := service.NewPermissionService(permRepo, authz, masker, auditSvc)
-	webSvc := service.NewWebService()
+	permSvc := service.NewPermissionService(permRepo, roleRepo, authz, masker, auditSvc)
+	webSvc := service.NewWebService(cfg.SearchProvider)
+	weatherSvc := service.NewWeatherService()
 
-	toolHandler := handler.NewToolHandler(authSvc, querySvc, permSvc, webSvc, cfg.WorkDir, cfg.SandboxEnabled)
+	toolHandler := handler.NewToolHandler(authSvc, querySvc, permSvc, webSvc, weatherSvc, cfg.WorkDir, cfg.SandboxEnabled)
 
 	// 用 mcp-go 构建 MCP 服务，并注册全部业务工具。
 	mcpServer := server.NewMCPServer(
@@ -81,25 +90,66 @@ func main() {
 	// 根据 transport 配置启动对应传输层
 	switch strings.ToLower(cfg.Transport) {
 	case "http":
-		startHTTP(ctx, cfg, mcpServer, authSvc, permSvc)
+		if err := startHTTP(ctx, cfg, mcpServer, authSvc, permSvc); err != nil && ctx.Err() == nil {
+			log.Fatalf("http server: %v", err)
+		}
 	case "both":
+		var wg sync.WaitGroup
+		wg.Add(2)
 		go func() {
-			log.Println("mcp-data-server stdio transport started")
-			if err := server.ServeStdio(mcpServer); err != nil && ctx.Err() == nil {
-				log.Printf("stdio stopped: %v", err)
+			defer wg.Done()
+			if err := startStdio(ctx, mcpServer); err != nil && ctx.Err() == nil {
+				log.Printf("stdio server error: %v", err)
+				cancel()
 			}
 		}()
-		startHTTP(ctx, cfg, mcpServer, authSvc, permSvc)
-	default: // stdio（默认）
-		log.Println("mcp-data-server started, listening on stdio")
-		if err := server.ServeStdio(mcpServer); err != nil && ctx.Err() == nil {
-			log.Fatalf("server stopped: %v", err)
+		go func() {
+			defer wg.Done()
+			if err := startHTTP(ctx, cfg, mcpServer, authSvc, permSvc); err != nil && ctx.Err() == nil {
+				log.Printf("http server error: %v", err)
+				cancel()
+			}
+		}()
+		<-ctx.Done()
+		wg.Wait()
+	default: // stdio
+		if err := startStdio(ctx, mcpServer); err != nil && ctx.Err() == nil {
+			log.Fatalf("stdio server: %v", err)
 		}
 	}
 }
 
-// startHTTP 启动 HTTP 传输（MCP over streamable-http + 权限后台 + 内嵌 Web）。
-func startHTTP(ctx context.Context, cfg *config.Config, mcpServer *server.MCPServer, authSvc *service.AuthService, permSvc *service.PermissionService) {
+// startStdio 启动 stdio 传输，阻塞到 ctx 取消或发生错误。
+func startStdio(ctx context.Context, mcpServer *server.MCPServer) error {
+	log.Println("mcp-data-server started, listening on stdio")
+	s := server.NewStdioServer(mcpServer)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- s.Listen(ctx, os.Stdin, os.Stdout)
+	}()
+
+	select {
+	case <-ctx.Done():
+		// 收到 Ctrl+C/SIGTERM 后给 stdio server 最多 2 秒优雅退出
+		select {
+		case err := <-errCh:
+			if err != nil && !errors.Is(err, context.Canceled) {
+				log.Printf("stdio stopped: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+		}
+		return nil
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			return err
+		}
+		return nil
+	}
+}
+
+// startHTTP 启动 HTTP 传输（MCP over streamable-http + 权限后台 + 内嵌 Web），阻塞到 ctx 取消。
+func startHTTP(ctx context.Context, cfg *config.Config, mcpServer *server.MCPServer, authSvc *service.AuthService, permSvc *service.PermissionService) error {
 	addr := cfg.HTTPAddr
 	if addr == "" {
 		addr = ":8081"
@@ -109,14 +159,34 @@ func startHTTP(ctx context.Context, cfg *config.Config, mcpServer *server.MCPSer
 	adminSrv := admin.New(authSvc, permSvc)
 
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", httpSrv)                  // streamable-http（GET 建流 + POST 收发）
-	mux.Handle("/api/admin/", adminSrv.Handler()) // 权限后台 REST API
+	mux.Handle("/mcp", httpSrv)                    // streamable-http（GET 建流 + POST 收发）
+	mux.Handle("/api/admin/", adminSrv.Handler())  // 权限后台 REST API
 	mux.Handle("/", web.StaticHandler(cfg.WebDir)) // 内嵌/外部 Web 页面
 
 	handler := withCORS(mux)
+	srv := &http.Server{Addr: addr, Handler: handler}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.ListenAndServe()
+	}()
+
 	log.Printf("mcp-data-server HTTP started: http://%s  (mcp=/mcp, admin=/api/admin, web=/)", normalizeAddr(addr))
-	if err := http.ListenAndServe(addr, handler); err != nil && ctx.Err() == nil {
-		log.Fatalf("http server stopped: %v", err)
+	select {
+	case <-ctx.Done():
+		// 收到 Ctrl+C/SIGTERM 后优雅关闭 HTTP 服务
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("http shutdown error: %v", err)
+		}
+		<-errCh
+		return nil
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
 	}
 }
 

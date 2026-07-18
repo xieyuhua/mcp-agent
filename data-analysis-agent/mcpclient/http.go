@@ -78,6 +78,7 @@ type httpTransport struct {
 	mu        sync.Mutex
 	nextID    int
 	tools     []ToolMeta
+	sessionMu sync.RWMutex
 	sessionID string
 }
 
@@ -147,17 +148,21 @@ func (t *httpTransport) post(req rpcRequest, out interface{}, onProgress func(me
 	for k, v := range t.headers {
 		httpReq.Header.Set(k, v)
 	}
-	if t.sessionID != "" {
-		httpReq.Header.Set("Mcp-Session-Id", t.sessionID)
+	t.sessionMu.RLock()
+	sid := t.sessionID
+	t.sessionMu.RUnlock()
+	if sid != "" {
+		httpReq.Header.Set("Mcp-Session-Id", sid)
 	}
-
 	resp, err := t.client.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("post %s: %w", t.baseURL, err)
 	}
 	defer resp.Body.Close()
 	if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {
+		t.sessionMu.Lock()
 		t.sessionID = sid
+		t.sessionMu.Unlock()
 	}
 	ct := resp.Header.Get("Content-Type")
 	if strings.Contains(ct, "text/event-stream") {

@@ -6,7 +6,9 @@ package confdb
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,9 +42,15 @@ type Store struct {
 // New 打开（或创建）SQLite 数据库，自动建表，并按需播种初始配置。
 // fileConfig 为 config.json 加载后的配置（可为 nil，表示仅用内置默认值）。
 func New(dbPath string, fileConfig *config.Config) (*Store, error) {
-	db, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
+	if dbPath == "" {
+		return nil, errors.New("confdb path is empty")
+	}
+	db, err := gorm.Open(sqlite.Open(dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"), &gorm.Config{})
 	if err != nil {
 		return nil, fmt.Errorf("open config db %s: %w", dbPath, err)
+	}
+	if err := configurePool(db); err != nil {
+		return nil, fmt.Errorf("configure config db pool: %w", err)
 	}
 	if err := db.AutoMigrate(&ConfigItem{}); err != nil {
 		return nil, fmt.Errorf("migrate config db: %w", err)
@@ -59,6 +67,24 @@ func New(dbPath string, fileConfig *config.Config) (*Store, error) {
 	return s, nil
 }
 
+// configurePool 配置 SQLite 连接池，避免并发访问冲突。
+func configurePool(db *gorm.DB) error {
+	sqlDB, err := db.DB()
+	if err != nil {
+		return err
+	}
+	sqlDB.SetMaxOpenConns(1)
+	sqlDB.SetMaxIdleConns(1)
+	sqlDB.SetConnMaxLifetime(1 * time.Hour)
+	if err := db.Exec("PRAGMA journal_mode=WAL").Error; err != nil {
+		log.Printf("warn: confdb WAL mode: %v", err)
+	}
+	if err := db.Exec("PRAGMA busy_timeout=5000").Error; err != nil {
+		log.Printf("warn: confdb busy_timeout: %v", err)
+	}
+	return nil
+}
+
 // DBPath 返回数据库文件路径。
 func (s *Store) DBPath() string { return s.path }
 
@@ -66,7 +92,12 @@ func (s *Store) DBPath() string { return s.path }
 func (s *Store) AdminCreds() (username, password string) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for _, it := range s.List() {
+	items, err := s.List()
+	if err != nil {
+		log.Printf("warn: load admin creds: %v", err)
+		return "admin", "admin123"
+	}
+	for _, it := range items {
 		switch it.Key {
 		case KeyAdminUser:
 			username = it.Value
@@ -125,10 +156,12 @@ func (s *Store) Get() *config.Config {
 }
 
 // List 返回全部配置项（供后台页面展示）。
-func (s *Store) List() []ConfigItem {
+func (s *Store) List() ([]ConfigItem, error) {
 	var items []ConfigItem
-	s.db.Order("key").Find(&items)
-	return items
+	if err := s.db.Order("key").Find(&items).Error; err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 // Update 批量更新若干配置项（key->value），持久化到数据库并刷新内存缓存。
@@ -202,9 +235,9 @@ const (
 	KeyMCPUsername   = "mcp.username"
 	KeyMCPPassword   = "mcp.password"
 	// MCP（remote）
-	KeyMCPBaseURL  = "mcp.base_url"
+	KeyMCPBaseURL   = "mcp.base_url"
 	KeyMCPTransport = "mcp.transport"
-	KeyMCPAPIKey   = "mcp.api_key"
+	KeyMCPAPIKey    = "mcp.api_key"
 	// MCP（额外对接的远程服务列表，JSON 数组）
 	KeyMCPExtra = "mcp.extra"
 	// Agent
@@ -212,15 +245,27 @@ const (
 	KeyAgentUseNative     = "agent.use_native_tools"
 	KeyAgentMaxResultRows = "agent.max_result_rows"
 	// Agent 记忆窗口
-	KeyAgentMemMaxHistory      = "agent.memory_max_history"
+	KeyAgentMemMaxHistory       = "agent.memory_max_history"
 	KeyAgentMemSummaryThreshold = "agent.memory_summary_threshold"
-	KeyAgentMemRecentKeep      = "agent.memory_recent_keep"
+	KeyAgentMemRecentKeep       = "agent.memory_recent_keep"
 	// Log
 	KeyLogSaveToFile = "log.save_to_file"
 	KeyLogDir        = "log.dir"
 	// Prompts
 	KeyPromptBuiltin = "prompts.builtin"
 	KeyPromptRemote  = "prompts.remote"
+	// UI 展示开关
+	KeyUIShowDuration = "ui.show_duration"
+	KeyUIShowSteps    = "ui.show_steps"
+	KeyUIShowImages   = "ui.show_images"
+	KeyUITheme        = "ui.theme"
+	KeyUIAppTitle     = "ui.app_title"
+	KeyUIAppSubtitle  = "ui.app_subtitle"
+	KeyUIWorkflow     = "ui.workflow_steps"
+	KeyUIAdminPageSize = "ui.admin_page_size"
+	KeyUIChatPageSize  = "ui.chat_page_size"
+	KeyUIPhoneRequired = "ui.phone_required"
+	KeyUIPhoneVerify   = "ui.phone_verify_required"
 	// Admin 后台登录凭据
 	KeyAdminUser = "admin.username"
 	KeyAdminPass = "admin.password"
@@ -235,7 +280,11 @@ func validKey(k string) bool {
 		KeyAgentMaxSteps, KeyAgentUseNative, KeyAgentMaxResultRows,
 		KeyAgentMemMaxHistory, KeyAgentMemSummaryThreshold, KeyAgentMemRecentKeep,
 		KeyLogSaveToFile, KeyLogDir,
-		KeyPromptBuiltin, KeyPromptRemote, KeyAdminUser, KeyAdminPass:
+		KeyPromptBuiltin, KeyPromptRemote,
+		KeyUIShowDuration, KeyUIShowSteps, KeyUIShowImages,
+		KeyUITheme, KeyUIAppTitle, KeyUIAppSubtitle, KeyUIWorkflow,
+		KeyUIAdminPageSize, KeyUIChatPageSize, KeyUIPhoneRequired, KeyUIPhoneVerify,
+		KeyAdminUser, KeyAdminPass:
 		return true
 	}
 	return false
@@ -278,6 +327,17 @@ func toItems(c *config.Config) []ConfigItem {
 		mk(KeyLogDir, c.Log.Dir, "日志文件目录（默认 logs）"),
 		mk(KeyPromptBuiltin, c.Prompts.Builtin, "内置数据库分析场景系统提示词"),
 		mk(KeyPromptRemote, c.Prompts.Remote, "远程 MCP 场景系统提示词"),
+		mk(KeyUIShowDuration, b(c.UI.ShowDuration), "是否展示耗时统计"),
+		mk(KeyUIShowSteps, b(c.UI.ShowSteps), "是否展示分析过程"),
+		mk(KeyUIShowImages, b(c.UI.ShowImages), "是否展示图片/图表"),
+		mk(KeyUITheme, c.UI.Theme, "后台管理页面主题：dark | light | auto"),
+		mk(KeyUIAppTitle, c.UI.AppTitle, "应用标题（前后台共用）"),
+		mk(KeyUIAppSubtitle, c.UI.AppSubtitle, "应用副标题/描述（前后台共用）"),
+		mk(KeyUIWorkflow, c.UI.WorkflowSteps, "前台顶部流程步骤文案，用 → 分隔"),
+		mk(KeyUIAdminPageSize, itoa(c.UI.AdminPageSize), "后台管理页面默认分页大小"),
+		mk(KeyUIChatPageSize, itoa(c.UI.ChatPageSize), "前端聊天消息分页默认大小"),
+		mk(KeyUIPhoneRequired, b(c.UI.PhoneRequired), "注册是否强制填写手机号"),
+		mk(KeyUIPhoneVerify, b(c.UI.PhoneVerifyRequired), "是否强制手机号验证（当前格式校验）"),
 		mk(KeyAdminUser, "admin", "后台管理登录账号"),
 		mk(KeyAdminPass, "admin123", "后台管理登录密码"),
 	}
@@ -346,6 +406,28 @@ func applyItem(c *config.Config, key, value string) error {
 		c.Prompts.Builtin = value
 	case KeyPromptRemote:
 		c.Prompts.Remote = value
+	case KeyUIShowDuration:
+		c.UI.ShowDuration = isTrue(value)
+	case KeyUIShowSteps:
+		c.UI.ShowSteps = isTrue(value)
+	case KeyUIShowImages:
+		c.UI.ShowImages = isTrue(value)
+	case KeyUITheme:
+		c.UI.Theme = value
+	case KeyUIAppTitle:
+		c.UI.AppTitle = value
+	case KeyUIAppSubtitle:
+		c.UI.AppSubtitle = value
+	case KeyUIWorkflow:
+		c.UI.WorkflowSteps = value
+	case KeyUIAdminPageSize:
+		c.UI.AdminPageSize = atoi(value)
+	case KeyUIChatPageSize:
+		c.UI.ChatPageSize = atoi(value)
+	case KeyUIPhoneRequired:
+		c.UI.PhoneRequired = isTrue(value)
+	case KeyUIPhoneVerify:
+		c.UI.PhoneVerifyRequired = isTrue(value)
 	case KeyAdminUser:
 		// admin.username 仅用于登录鉴权，不进入运行配置。
 	case KeyAdminPass:
@@ -362,6 +444,7 @@ func b(v bool) string { return map[bool]string{true: "true", false: "false"}[v] 
 func isTrue(s string) bool {
 	return s == "true" || s == "1" || s == "yes" || s == "on"
 }
+
 // marshalExtra 序列化额外 MCP 列表为 JSON 字符串（空列表存 "[]"）。
 func marshalExtra(list []config.RemoteMCP) string {
 	if len(list) == 0 {

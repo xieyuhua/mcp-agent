@@ -24,6 +24,7 @@ type StepLog struct {
 	Args     string `json:"args"`
 	Result   string `json:"result"`
 	Progress string `json:"progress,omitempty"` // 工具执行期间的流式进度提示（如「已读取 1200 行」）
+	Duration int64  `json:"duration,omitempty"`   // 工具执行耗时（毫秒）
 }
 
 // AskResult 一次提问的结构化结果，供 HTTP 接口返回给前端。
@@ -38,4 +39,10 @@ type AskResult struct {
 	SQL string `json:"sql,omitempty"`
 	// Steps 工具调用轨迹。
 	Steps []StepLog `json:"steps,omitempty"`
+	// TotalDuration 整轮请求总耗时（毫秒）。
+	TotalDuration int64 `json:"total_duration,omitempty"`
+	// LLMDuration 模型调用累计耗时（毫秒）。
+	LLMDuration int64 `json:"llm_duration,omitempty"`
+	// ToolDuration 工具调用累计耗时（毫秒）。
+	ToolDuration int64 `json:"tool_duration,omitempty"`
 }

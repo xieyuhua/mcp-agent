@@ -16,12 +16,13 @@ type ToolHandler struct {
 	query      *service.QueryService
 	permission *service.PermissionService
 	web        *service.WebService
+	weather    *service.WeatherService
 	workDir    string // 文件/目录工具根目录（沙箱模式下为沙箱根，系统模式下仅作相对路径基准）
 	sandbox    bool   // 是否启用沙箱：true 限制在工作目录内；false 允许访问系统任意绝对路径
 }
 
-func NewToolHandler(auth *service.AuthService, query *service.QueryService, permission *service.PermissionService, web *service.WebService, workDir string, sandbox bool) *ToolHandler {
-	return &ToolHandler{auth: auth, query: query, permission: permission, web: web, workDir: workDir, sandbox: sandbox}
+func NewToolHandler(auth *service.AuthService, query *service.QueryService, permission *service.PermissionService, web *service.WebService, weather *service.WeatherService, workDir string, sandbox bool) *ToolHandler {
+	return &ToolHandler{auth: auth, query: query, permission: permission, web: web, weather: weather, workDir: workDir, sandbox: sandbox}
 }
 
 // ctxFromArgs 从参数中取出 token 并解析租户上下文。
@@ -127,11 +128,11 @@ func (h *ToolHandler) permSet(ctx context.Context, args map[string]interface{}) 
 		return nil, err
 	}
 	req := service.SetPolicyRequest{
-		TenantID:     optString(args["tenant_id"]),
-		Role:         optString(args["role"]),
-		DataScope:    optString(args["data_scope"]),
+		TenantID:      optString(args["tenant_id"]),
+		Role:          optString(args["role"]),
+		DataScope:     optString(args["data_scope"]),
 		AllowedTables: toStringSlice(args["allowed_tables"]),
-		CanRawSQL:    optBool(args["can_raw_sql"]),
+		CanRawSQL:     optBool(args["can_raw_sql"]),
 	}
 	view, err := h.permission.SetPolicy(tc, req)
 	if err != nil {
@@ -218,6 +219,18 @@ func (h *ToolHandler) webFetch(ctx context.Context, args map[string]interface{},
 		return nil, fmt.Errorf("url is required")
 	}
 	return h.web.Fetch(ctx, targetURL, optInt(args["max_chars"]), onProgress)
+}
+
+// queryWeather 查询指定城市的实时天气。需要登录态 token。
+func (h *ToolHandler) queryWeather(ctx context.Context, args map[string]interface{}, onProgress service.ProgressFunc) (interface{}, error) {
+	if _, _, err := h.ctxFromArgs(args); err != nil {
+		return nil, err
+	}
+	location, _ := args["location"].(string)
+	if strings.TrimSpace(location) == "" {
+		return nil, fmt.Errorf("location is required")
+	}
+	return h.weather.Query(ctx, location, onProgress)
 }
 
 // ---- 参数转换辅助 ----

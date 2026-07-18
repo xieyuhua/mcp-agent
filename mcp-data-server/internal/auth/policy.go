@@ -11,6 +11,7 @@ import (
 // 以接口形式依赖，避免 auth 与 repository 形成循环依赖。
 type PolicyStore interface {
 	ListPolicies(tenantID string) ([]model.PermissionPolicy, error)
+	ListFieldPermissions(tenantID string) ([]model.FieldPermission, error)
 }
 
 // 角色定义（多租户 SaaS 权限模型）。
@@ -85,10 +86,11 @@ type Resolver struct {
 	store PolicyStore
 	mu    sync.RWMutex
 	cache map[string]*model.PermissionPolicy // key: tenantID+"\x00"+role
+	field map[string]map[string]map[string]bool // key: tenantID+"\x00"+role -> table -> column -> hidden
 }
 
 func NewResolver(store PolicyStore) *Resolver {
-	return &Resolver{store: store, cache: map[string]*model.PermissionPolicy{}}
+	return &Resolver{store: store, cache: map[string]*model.PermissionPolicy{}, field: map[string]map[string]map[string]bool{}}
 }
 
 func cacheKey(tenantID, role string) string { return tenantID + "\x00" + role }
@@ -96,6 +98,10 @@ func cacheKey(tenantID, role string) string { return tenantID + "\x00" + role }
 // Refresh 从数据库重新加载某租户（含平台默认）的策略到缓存。
 func (r *Resolver) Refresh(tenantID string) error {
 	policies, err := r.store.ListPolicies(tenantID)
+	if err != nil {
+		return err
+	}
+	fields, err := r.store.ListFieldPermissions(tenantID)
 	if err != nil {
 		return err
 	}
@@ -107,9 +113,29 @@ func (r *Resolver) Refresh(tenantID string) error {
 			delete(r.cache, k)
 		}
 	}
+	for k := range r.field {
+		parts := strings.SplitN(k, "\x00", 2)
+		if len(parts) == 2 {
+			if t := strings.TrimSpace(parts[0]); t == tenantID || t == "" {
+				delete(r.field, k)
+			}
+		}
+	}
 	for i := range policies {
 		p := policies[i]
 		r.cache[cacheKey(p.TenantID, p.Role)] = &p
+	}
+	// 字段权限按 tenant+role 分组缓存
+	for i := range fields {
+		fp := fields[i]
+		key := cacheKey(fp.TenantID, fp.Role)
+		if r.field[key] == nil {
+			r.field[key] = map[string]map[string]bool{}
+		}
+		if r.field[key][fp.TableName] == nil {
+			r.field[key][fp.TableName] = map[string]bool{}
+		}
+		r.field[key][fp.TableName][fp.Column] = fp.Hidden
 	}
 	return nil
 }
@@ -140,6 +166,19 @@ func (r *Resolver) CanRunRawSQL(tenantID, role string) bool {
 		return p.CanRawSQL
 	}
 	return DefaultCanRawSQL(role)
+}
+
+// lookup 优先租户级，再平台默认。
+func (r *Resolver) HiddenFields(tenantID, role string) map[string]map[string]bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if m, ok := r.field[cacheKey(tenantID, role)]; ok {
+		return m
+	}
+	if m, ok := r.field[cacheKey("", role)]; ok {
+		return m
+	}
+	return map[string]map[string]bool{}
 }
 
 // lookup 优先租户级，再平台默认。

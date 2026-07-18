@@ -26,8 +26,16 @@ func New(authSvc *service.AuthService, permSvc *service.PermissionService) *Serv
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/admin/login", s.handleLogin)
+	mux.HandleFunc("/api/admin/roles", s.handleRoles)
 	mux.HandleFunc("/api/admin/policies", s.handlePolicies)
+	mux.HandleFunc("/api/admin/policies/export", s.handleExportPolicies)
+	mux.HandleFunc("/api/admin/policies/import", s.handleImportPolicies)
 	mux.HandleFunc("/api/admin/mask-rules", s.handleMaskRules)
+	mux.HandleFunc("/api/admin/mask-rules/export", s.handleExportMaskRules)
+	mux.HandleFunc("/api/admin/mask-rules/import", s.handleImportMaskRules)
+	mux.HandleFunc("/api/admin/field-permissions", s.handleFieldPermissions)
+	mux.HandleFunc("/api/admin/field-permissions/export", s.handleExportFieldPermissions)
+	mux.HandleFunc("/api/admin/field-permissions/import", s.handleImportFieldPermissions)
 	return mux
 }
 
@@ -71,6 +79,43 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"token": tok})
+}
+
+func (s *Server) handleRoles(w http.ResponseWriter, r *http.Request) {
+	tc, err := s.ctxFromRequest(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{"error": err.Error()})
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		roles, err := s.perm.ListRoles(tc, r.URL.Query().Get("tenant_id"))
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"roles": roles})
+	case http.MethodPost:
+		var req service.SetRoleRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "invalid body"})
+			return
+		}
+		v, err := s.perm.SetRole(tc, req)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, v)
+	case http.MethodDelete:
+		if err := s.perm.DeleteRole(tc, r.URL.Query().Get("tenant_id"), r.URL.Query().Get("name")); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"deleted": true})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
@@ -145,6 +190,179 @@ func (s *Server) handleMaskRules(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func (s *Server) handleFieldPermissions(w http.ResponseWriter, r *http.Request) {
+	tc, err := s.ctxFromRequest(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{"error": err.Error()})
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		views, err := s.perm.ListFieldPermissions(tc, r.URL.Query().Get("tenant_id"))
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"field_permissions": views})
+	case http.MethodPost:
+		var req service.SetFieldPermissionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "invalid body"})
+			return
+		}
+		v, err := s.perm.SetFieldPermission(tc, req)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, v)
+	case http.MethodDelete:
+		if err := s.perm.DeleteFieldPermission(tc,
+			r.URL.Query().Get("tenant_id"),
+			r.URL.Query().Get("role"),
+			r.URL.Query().Get("table"),
+			r.URL.Query().Get("column")); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"deleted": true})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleExportPolicies(w http.ResponseWriter, r *http.Request) {
+	_, err := s.ctxFromRequest(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{"error": err.Error()})
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	data, err := s.perm.ExportPoliciesCSV(r.URL.Query().Get("tenant_id"))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", "attachment; filename=policies.csv")
+	_, _ = w.Write(data)
+}
+
+func (s *Server) handleImportPolicies(w http.ResponseWriter, r *http.Request) {
+	tc, err := s.ctxFromRequest(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{"error": err.Error()})
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "missing file field"})
+		return
+	}
+	defer file.Close()
+	n, err := s.perm.ImportPoliciesCSV(tc, file)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"imported": n})
+}
+
+func (s *Server) handleExportMaskRules(w http.ResponseWriter, r *http.Request) {
+	_, err := s.ctxFromRequest(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{"error": err.Error()})
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	data, err := s.perm.ExportMaskRulesCSV(r.URL.Query().Get("tenant_id"))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", "attachment; filename=mask_rules.csv")
+	_, _ = w.Write(data)
+}
+
+func (s *Server) handleImportMaskRules(w http.ResponseWriter, r *http.Request) {
+	tc, err := s.ctxFromRequest(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{"error": err.Error()})
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "missing file field"})
+		return
+	}
+	defer file.Close()
+	n, err := s.perm.ImportMaskRulesCSV(tc, file)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"imported": n})
+}
+
+func (s *Server) handleExportFieldPermissions(w http.ResponseWriter, r *http.Request) {
+	_, err := s.ctxFromRequest(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{"error": err.Error()})
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	data, err := s.perm.ExportFieldPermissionsCSV(r.URL.Query().Get("tenant_id"))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", "attachment; filename=field_permissions.csv")
+	_, _ = w.Write(data)
+}
+
+func (s *Server) handleImportFieldPermissions(w http.ResponseWriter, r *http.Request) {
+	tc, err := s.ctxFromRequest(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{"error": err.Error()})
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "missing file field"})
+		return
+	}
+	defer file.Close()
+	n, err := s.perm.ImportFieldPermissionsCSV(tc, file)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"imported": n})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v interface{}) {

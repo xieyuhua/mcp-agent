@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -13,19 +14,25 @@ import (
 )
 
 // WebService 联网查询能力：网页搜索与网页正文抓取。
-// 搜索使用 DuckDuckGo HTML 版（无需 API key，适合本地/内网部署）；
+// 搜索默认使用 DuckDuckGo HTML 版（无需 API key，适合本地/内网部署），
+// 并支持通过 provider 切换为 Bing 或自动回退；
 // 抓取使用标准库解析 HTML 并提取纯文本，去除脚本/样式/注释噪声。
 type WebService struct {
 	client    *http.Client
 	userAgent string
+	provider  string
 }
 
-// NewWebService 构造联网查询服务。
-func NewWebService() *WebService {
+// NewWebService 构造联网查询服务。provider 可选 duckduckgo / bing / auto，空值默认 duckduckgo。
+func NewWebService(provider string) *WebService {
+	if provider == "" {
+		provider = "duckduckgo"
+	}
 	return &WebService{
 		client: &http.Client{Timeout: 20 * time.Second},
 		userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
 			"(KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+		provider: strings.ToLower(provider),
 	}
 }
 
@@ -38,9 +45,10 @@ type SearchResult struct {
 
 // SearchResponse 联网搜索返回。
 type SearchResponse struct {
-	Query   string         `json:"query"`
-	Count   int            `json:"count"`
-	Results []SearchResult `json:"results"`
+	Query    string         `json:"query"`
+	Count    int            `json:"count"`
+	Provider string         `json:"provider"`
+	Results  []SearchResult `json:"results"`
 }
 
 // Search 执行一次联网搜索，返回前 limit 条结果（默认 5，最大 10）。
@@ -59,21 +67,58 @@ func (w *WebService) Search(_ context.Context, query string, limit int, onProgre
 		onProgress(0, "正在联网搜索: "+query)
 	}
 
-	searchURL := "https://html.duckduckgo.com/html/?q=" + url.QueryEscape(query)
-	body, err := w.getHTML(searchURL)
+	start := time.Now()
+	results, provider, err := w.searchWithProvider(query, limit)
 	if err != nil {
-		return nil, fmt.Errorf("web search request failed: %w", err)
+		return nil, fmt.Errorf("web search failed: %w", err)
 	}
-	defer body.Close()
-
-	results, err := parseDuckDuckGo(body, limit)
-	if err != nil {
-		return nil, fmt.Errorf("parse search results: %w", err)
-	}
+	log.Printf("[web_search] provider=%s query=%q results=%d duration=%s", provider, query, len(results), time.Since(start))
 	if onProgress != nil {
 		onProgress(len(results), fmt.Sprintf("搜索完成，获得 %d 条结果", len(results)))
 	}
-	return &SearchResponse{Query: query, Count: len(results), Results: results}, nil
+	return &SearchResponse{Query: query, Count: len(results), Provider: provider, Results: results}, nil
+}
+
+// searchWithProvider 根据 provider 选择搜索源，auto 模式下优先 DuckDuckGo 失败后回退 Bing。
+func (w *WebService) searchWithProvider(query string, limit int) ([]SearchResult, string, error) {
+	switch w.provider {
+	case "bing":
+		results, err := w.searchBing(query, limit)
+		return results, "bing", err
+	case "auto":
+		results, err := w.searchDuckDuckGo(query, limit)
+		if err == nil && len(results) > 0 {
+			return results, "duckduckgo", nil
+		}
+		log.Printf("[web_search] duckduckgo failed or empty, fallback to bing: %v", err)
+		results, err = w.searchBing(query, limit)
+		return results, "bing", err
+	default:
+		results, err := w.searchDuckDuckGo(query, limit)
+		return results, "duckduckgo", err
+	}
+}
+
+// searchDuckDuckGo 使用 DuckDuckGo HTML 版搜索。
+func (w *WebService) searchDuckDuckGo(query string, limit int) ([]SearchResult, error) {
+	searchURL := "https://html.duckduckgo.com/html/?q=" + url.QueryEscape(query)
+	body, err := w.getHTML(searchURL)
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+	return parseDuckDuckGo(body, limit)
+}
+
+// searchBing 使用 Bing HTML 搜索作为 DuckDuckGo 的替代/回退。
+func (w *WebService) searchBing(query string, limit int) ([]SearchResult, error) {
+	searchURL := "https://www.bing.com/search?q=" + url.QueryEscape(query)
+	body, err := w.getHTML(searchURL)
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+	return parseBing(body, limit)
 }
 
 // FetchResult 网页抓取返回。
@@ -104,6 +149,7 @@ func (w *WebService) Fetch(_ context.Context, targetURL string, maxChars int, on
 		onProgress(0, "正在抓取网页: "+targetURL)
 	}
 
+	start := time.Now()
 	body, err := w.getHTML(targetURL)
 	if err != nil {
 		return nil, fmt.Errorf("fetch web page failed: %w", err)
@@ -115,6 +161,7 @@ func (w *WebService) Fetch(_ context.Context, targetURL string, maxChars int, on
 		return nil, fmt.Errorf("extract text: %w", err)
 	}
 	truncated := len([]rune(text)) >= maxChars
+	log.Printf("[web_fetch] url=%s title=%q length=%d duration=%s", targetURL, title, len([]rune(text)), time.Since(start))
 	if onProgress != nil {
 		onProgress(len([]rune(text)), "网页抓取完成")
 	}
@@ -136,6 +183,7 @@ func (w *WebService) getHTML(rawURL string) (io.ReadCloser, error) {
 	req.Header.Set("User-Agent", w.userAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+	req.Header.Set("Cache-Control", "max-age=0")
 	resp, err := w.client.Do(req)
 	if err != nil {
 		return nil, err
@@ -166,7 +214,7 @@ func parseDuckDuckGo(r io.Reader, limit int) ([]SearchResult, error) {
 				if real := decodeDuckDuckGoURL(href); real != "" {
 					href = real
 				}
-				snippet := findSnippet(n)
+				snippet := findDuckDuckGoSnippet(n)
 				results = append(results, SearchResult{
 					Title:   strings.TrimSpace(title),
 					URL:     href,
@@ -182,8 +230,8 @@ func parseDuckDuckGo(r io.Reader, limit int) ([]SearchResult, error) {
 	return results, nil
 }
 
-// findSnippet 从标题链接节点出发，在其祖先 result 容器内查找摘要文本。
-func findSnippet(linkNode *html.Node) string {
+// findDuckDuckGoSnippet 从标题链接节点出发，在其祖先 result 容器内查找摘要文本。
+func findDuckDuckGoSnippet(linkNode *html.Node) string {
 	container := linkNode
 	for container != nil && !hasClass(container, "result") {
 		container = container.Parent
@@ -207,6 +255,60 @@ func findSnippet(linkNode *html.Node) string {
 	}
 	walk(container)
 	return snippet
+}
+
+// parseBing 从 Bing HTML 结果页解析搜索结果。
+func parseBing(r io.Reader, limit int) ([]SearchResult, error) {
+	doc, err := html.Parse(r)
+	if err != nil {
+		return nil, err
+	}
+	var results []SearchResult
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if len(results) >= limit {
+			return
+		}
+		if n.Type == html.ElementNode && n.Data == "li" && hasClass(n, "b_algo") {
+			res := parseBingResultItem(n)
+			if res.Title != "" && res.URL != "" {
+				results = append(results, res)
+			}
+			return
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(doc)
+	return results, nil
+}
+
+// parseBingResultItem 解析单个 Bing 结果 li.b_algo。
+func parseBingResultItem(li *html.Node) SearchResult {
+	var res SearchResult
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if res.Title != "" && res.URL != "" && res.Snippet != "" {
+			return
+		}
+		if n.Type == html.ElementNode && n.Data == "a" {
+			if res.URL == "" {
+				href := attr(n, "href")
+				if href != "" && strings.HasPrefix(href, "http") {
+					res.URL = href
+					res.Title = strings.TrimSpace(textContent(n))
+				}
+			}
+		} else if n.Type == html.ElementNode && n.Data == "p" && res.Snippet == "" {
+			res.Snippet = strings.TrimSpace(textContent(n))
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(li)
+	return res
 }
 
 // decodeDuckDuckGoURL 把 DuckDuckGo 的跳转链接还原为真实目标 URL。

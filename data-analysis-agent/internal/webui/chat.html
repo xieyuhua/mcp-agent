@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-<title>数据分析助手</title>
+<title id="pageTitle">数据分析助手</title>
 <style>
   :root {
     --bg: #0b0e14; --panel: #141925; --panel-2: #1b2230; --border: #272f3d;
@@ -65,6 +65,15 @@
   .bubble .md strong { color: var(--accent); }
   .row.user .bubble .md strong { color: #fff; }
   .block { margin-top: 12px; }
+  .load-more-wrap { display: flex; justify-content: center; margin: 6px 0; }
+  .load-more-btn { background: transparent; border: 1px solid var(--border); color: var(--text-dim); border-radius: 16px; padding: 6px 16px; font-size: 13px; cursor: pointer; transition: all .15s; }
+  .load-more-btn:hover { color: var(--text); border-color: var(--accent); }
+  .sql .sql-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; cursor: pointer; padding: 6px 8px; margin: -6px -8px; border-radius: 6px; transition: background .15s; }
+  .sql .sql-header:hover { background: var(--panel-2); }
+  .sql .sql-header .sql-label { font-size: 12px; color: var(--text-dim); }
+  .sql .sql-toggle { background: transparent; border: none; color: var(--accent); font-size: 12px; cursor: pointer; padding: 0; }
+  .sql .sql-body { display: none; margin-top: 8px; }
+  .sql.expanded .sql-body { display: block; }
   .sql .sql-label { font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }
   .sql pre { background: #0c0e13; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; overflow-x: auto; font-size: 12.5px; color: #b9e6c7; margin: 0; }
   [data-theme="light"] .sql pre { background: #1b2230; color: #cdeccf; }
@@ -95,6 +104,7 @@
   th { background: var(--panel-2); color: var(--text-dim); font-weight: 600; position: sticky; top: 0; }
   tbody tr:hover td { background: rgba(79,140,255,0.06); }
   .more { padding: 6px 11px; font-size: 12px; color: var(--text-dim); }
+.stats { font-size: 12px; color: var(--text-dim); padding: 6px 10px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; display: inline-block; }
   canvas.chart { width: 100%; height: 260px; display: block; border-radius: 10px; background: linear-gradient(180deg, rgba(79,140,255,0.04), transparent); }
   .chart.block, .sql.block, .table-wrap.block, .steps.block { margin-top: 12px; }
   .chart.block { padding: 10px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px; }
@@ -120,8 +130,10 @@
   .drawer h3 { margin: 0; padding: 18px 18px; border-bottom: 1px solid var(--border); font-size: 16px; font-weight: 700; }
   .drawer .body { padding: 18px; overflow-y: auto; display: flex; flex-direction: column; gap: 18px; }
   .field label { display: block; font-size: 13px; color: var(--text-dim); margin-bottom: 6px; font-weight: 600; }
-  .field input[type="text"], .field input[type="number"], .field select { width: 100%; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 9px 11px; font-size: 14px; font-family: inherit; }
-  .field input:focus, .field select:focus { outline: none; border-color: var(--accent); }
+  .field input[type="text"], .field input[type="number"], .field select, .field textarea { width: 100%; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 9px 11px; font-size: 14px; font-family: inherit; }
+  .field input:focus, .field select:focus, .field textarea:focus { outline: none; border-color: var(--accent); }
+  .field textarea { resize: vertical; min-height: 80px; }
+
   .field .hint { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
   .range-row { display: flex; align-items: center; gap: 10px; }
   .range-row input[type="range"] { flex: 1; accent-color: var(--accent); }
@@ -227,8 +239,8 @@
       <button class="icon-btn menu-btn" id="menuBtn">☰</button>
       <span class="logo">📊</span>
       <div>
-        <div class="title">数据分析助手</div>
-        <div class="subtitle">自然语言 → LLM → MCP 权限 → SQL → 图表分析</div>
+        <div class="title" id="appTitle">数据分析助手</div>
+        <div class="subtitle" id="appSubtitle">自然语言 → LLM → MCP 权限 → SQL → 图表分析</div>
       </div>
     </div>
     <div class="actions">
@@ -253,7 +265,7 @@
   </div>
 
   <footer class="composer">
-    <textarea id="input" rows="1" placeholder="输入你的数据分析问题，回车发送（Shift+Enter 换行）"></textarea>
+    <textarea id="input" rows="1" placeholder="输入你的数据分析问题"></textarea>
     <button class="send" id="sendBtn">发送</button>
   </footer>
 </div>
@@ -287,6 +299,10 @@
       <span class="desc">图表输出</span>
       <label class="switch"><input type="checkbox" id="setChart" /><span class="slider"></span></label>
     </div>
+    <div class="switch-row">
+      <span class="desc">耗时统计</span>
+      <label class="switch"><input type="checkbox" id="setDuration" /><span class="slider"></span></label>
+    </div>
     <div class="field">
       <label>主题 Theme</label>
       <select id="setTheme">
@@ -295,6 +311,11 @@
         <option value="dark">深色</option>
       </select>
       <div class="hint">默认主题会跟随操作系统的深色/浅色偏好自动切换。</div>
+    </div>
+    <div class="field">
+      <label>自定义提示词 User Prompt</label>
+      <textarea id="setPrompt" rows="5" placeholder="留空则使用系统后台默认提示词。可在此追加个性化要求，例如：\"请展示原始SQL\"或\"不要展示SQL，只给业务结论。\"></textarea>
+      <div class="hint">追加在系统提示词之后，当前用户生效。支持通过提示词控制是否展示 SQL。</div>
     </div>
     <div class="switch-row">
       <span class="desc">自动滚动到最新</span>
@@ -336,6 +357,7 @@
 
   // ---- 登录态 ----
   var TOKEN_KEY = "daa_token";
+  var CONV_KEY = "daa_current_conv";
   var token = localStorage.getItem(TOKEN_KEY) || "";
   var currentUser = null;       // {id, username}
   var currentConv = "";         // 当前会话 ID
@@ -416,21 +438,41 @@
     if (token && !silent) api("/api/logout", { method: "POST" }).catch(function () {});
     token = ""; currentUser = null; currentConv = ""; convs = [];
     localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(CONV_KEY);
     resetChat();
     showAuth(true);
   }
 
   function onLoggedIn() {
     unameEl.textContent = (currentUser && currentUser.username) || "已登录";
-    loadConversations();
+    // 加载用户自定义提示词
+    api("/api/me/prompt").then(function (r) { return r.json(); }).then(function (d) {
+      userPrompt = d.prompt || "";
+    }).catch(function () {});
+    loadConversations(function () {
+      // 会话列表加载完成后，尝试恢复上一次选中的会话
+      var saved = localStorage.getItem(CONV_KEY);
+      if (saved) {
+        var found = false;
+        for (var i = 0; i < convs.length; i++) { if (convs[i].id === saved) { found = true; break; } }
+        if (found) {
+          selectConv(saved);
+        } else {
+          localStorage.removeItem(CONV_KEY);
+          currentConv = "";
+          resetChat();
+        }
+      }
+    });
   }
 
   // ---- 会话列表 ----
-  function loadConversations() {
+  function loadConversations(cb) {
     api("/api/conversations").then(function (r) { return r.json(); }).then(function (d) {
       convs = d.conversations || [];
       renderConvList();
-    }).catch(function () {});
+      if (typeof cb === "function") cb();
+    }).catch(function () { if (typeof cb === "function") cb(); });
   }
   function renderConvList() {
     convListEl.innerHTML = "";
@@ -447,50 +489,92 @@
   }
   function selectConv(id) {
     currentConv = id;
+    localStorage.setItem(CONV_KEY, id);
     renderConvList();
     if (window.innerWidth <= 600) sidebarEl.classList.remove("show");
-    loadMessages(id);
+    loadMessages(id, { latest: true });
   }
   function deleteConv(id) {
     var title = "";
     for (var i = 0; i < convs.length; i++) { if (convs[i].id === id) { title = convs[i].title || "新对话"; break; } }
     if (!confirm('确定删除会话「' + title + '」吗？\n删除后不可恢复。')) return;
     api("/api/conversations/" + id, { method: "DELETE" }).then(function () {
-      if (currentConv === id) { currentConv = ""; resetChat(); }
+      if (currentConv === id) { currentConv = ""; localStorage.removeItem(CONV_KEY); resetChat(); }
       loadConversations();
     }).catch(function () {});
   }
   function newConv() {
     currentConv = "";
+    localStorage.removeItem(CONV_KEY);
     resetChat();
     renderConvList();
     inputEl.focus();
     if (window.innerWidth <= 600) sidebarEl.classList.remove("show");
   }
 
-  function loadMessages(id) {
-    resetChat();
-    api("/api/conversations/" + id + "/messages").then(function (r) { return r.json(); }).then(function (d) {
-      (d.messages || []).forEach(function (m) {
-        if (m.role === "user") {
-          addUser(m.content);
-        } else {
-          var res = { answer: m.content };
-          if (m.extra) { try { var ex = JSON.parse(m.extra); res.chart = ex.chart; res.rows = ex.rows; res.sql = ex.sql; res.steps = ex.steps; } catch (e) {} }
-          renderAssistant(res);
-        }
-      });
+var loadMoreBtn = null;
+  var msgLimit = 50;
+  var msgOffset = 0;
+  var msgHasMore = false;
+
+  function prependLoadMore(id) {
+    if (loadMoreBtn) loadMoreBtn.remove();
+    loadMoreBtn = document.createElement("div");
+    loadMoreBtn.className = "load-more-wrap";
+    var btn = document.createElement("button");
+    btn.className = "load-more-btn"; btn.type = "button"; btn.textContent = "加载更多历史消息";
+    btn.onclick = function () { loadMessages(id, { offset: Math.max(0, msgOffset - msgLimit) }); };
+    loadMoreBtn.appendChild(btn);
+    chatEl.insertBefore(loadMoreBtn, chatEl.firstChild);
+  }
+
+  function buildMessageElement(m) {
+    if (m.role === "user") return buildUserRow(m.content);
+    var res = { answer: m.content };
+    if (m.extra) { try { var ex = JSON.parse(m.extra); res.chart = ex.chart; res.rows = ex.rows; res.sql = ex.sql; res.steps = ex.steps; } catch (e) {} }
+    return buildAssistantRow(res);
+  }
+
+  function loadMessages(id, opts) {
+    opts = opts || {};
+    var latest = opts.latest === true;
+    var offset = typeof opts.offset === "number" ? opts.offset : 0;
+    var path = "/api/conversations/" + id + "/messages?limit=50";
+    if (latest) path += "&latest=true";
+    else if (offset > 0) path += "&offset=" + offset;
+
+    api(path).then(function (r) { return r.json(); }).then(function (d) {
+      var msgs = d.messages || [];
+      var limit = d.limit || 50;
+      var newOffset = d.offset || 0;
+      var hasMore = d.has_more;
+
+      if (latest) {
+        resetChat();
+        msgLimit = limit; msgOffset = newOffset; msgHasMore = hasMore;
+        if (hasMore) prependLoadMore(id);
+        msgs.forEach(function (m) { chatEl.appendChild(buildMessageElement(m)); });
+        scrollBottom();
+      } else {
+        if (loadMoreBtn) { loadMoreBtn.remove(); loadMoreBtn = null; }
+        var before = chatEl.firstChild;
+        msgs.forEach(function (m) { chatEl.insertBefore(buildMessageElement(m), before); });
+        msgLimit = limit; msgOffset = newOffset; msgHasMore = hasMore;
+        if (hasMore) prependLoadMore(id);
+      }
     }).catch(function () {});
   }
 
   function resetChat() {
     chatEl.innerHTML = "";
     charts = [];
+    if (loadMoreBtn) { loadMoreBtn.remove(); loadMoreBtn = null; }
+    msgLimit = 50; msgOffset = 0; msgHasMore = false;
     // 欢迎语
     var row = document.createElement("div"); row.className = "row assistant";
     row.innerHTML = '<div class="avatar">AI</div><div class="bubble"><div class="md">'
-      + '<p style="margin-bottom:6px"><strong>👋 你好，我是数据分析助手</strong></p>'
-      + '<p>用自然语言提问，我会自动生成 SQL、经 MCP 权限校验后查询数据库，并在合适时生成图表。下面是一些可以试试的问题：</p></div></div>';
+      + '<p style="margin-bottom:6px"><strong>👋 你好，我是' + escapeHtml(globalUI.app_title || "数据分析助手") + '</strong></p>'
+      + '<p>' + escapeHtml(workflowSummary()) + '下面是一些可以试试的问题：</p></div></div>';
     chatEl.appendChild(row);
     samplesEl.style.display = "";
   }
@@ -523,6 +607,7 @@
 
   var SETTINGS_KEY = "daa_settings";
   var settings = loadSettings();
+  var userPrompt = ""; // 用户自定义提示词，通过 /api/me/prompt 存取，不存 localStorage
   var charts = [];
 
   function loadSettings() {
@@ -530,10 +615,39 @@
       var s = JSON.parse(localStorage.getItem(SETTINGS_KEY));
       if (s) return s;
     } catch (e) {}
-    return { model: "", temperature: 0, max_tokens: 0, showSteps: false, enableChart: true, theme: "auto", auto: true };
+    return { model: "", temperature: 0, max_tokens: 0, showSteps: true, enableChart: true, showDuration: true, theme: "auto", auto: true };
   }
   function saveSettings() { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); }
   function applyTheme() { document.documentElement.setAttribute("data-theme", settings.theme || "auto"); }
+  var globalUI = { app_title: "数据分析助手", app_subtitle: "自然语言 → LLM → MCP 权限 → SQL → 图表分析", workflow_steps: "自然语言 → LLM → MCP 权限 → SQL → 图表分析", theme: "auto" };
+  function loadGlobalUI() {
+    return fetch("/api/ui-config")
+      .then(function (r) { return r.json(); })
+      .then(function (cfg) {
+        globalUI.app_title = cfg.app_title || globalUI.app_title;
+        globalUI.app_subtitle = cfg.app_subtitle || globalUI.app_subtitle;
+        globalUI.workflow_steps = cfg.workflow_steps || globalUI.workflow_steps;
+        globalUI.theme = cfg.theme || globalUI.theme;
+        applyGlobalUI();
+        // 后台统一设置作为权威默认值：当后台关闭某项时，强制同步到前端设置。
+        if (cfg.show_duration === false) settings.showDuration = false;
+        if (cfg.show_steps === false) settings.showSteps = false;
+        if (cfg.show_images === false) settings.enableChart = false;
+        saveSettings();
+      })
+      .catch(function () {});
+  }
+  function applyGlobalUI() {
+    var title = globalUI.app_title || "数据分析助手";
+    var subtitle = globalUI.app_subtitle || "";
+    document.getElementById("pageTitle").textContent = title;
+    document.getElementById("appTitle").textContent = title;
+    document.getElementById("appSubtitle").textContent = subtitle;
+  }
+  function workflowSummary() {
+    var steps = (globalUI.workflow_steps || "").split(/[→]/).map(function (s) { return s.trim(); }).filter(Boolean);
+    return steps.length ? steps.join(" → ") : "用自然语言提问，我会自动生成 SQL、经 MCP 权限校验后查询数据库，并在合适时生成图表。";
+  }
 
   fetch("/api/models").then(function (r) { return r.json(); }).then(function (info) {
     var m = document.getElementById("setModel");
@@ -550,6 +664,14 @@
   function isNearBottom() { return chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight < 80; }
   // 仅当用户已贴近底部时才自动滚动，避免"回看历史"时被强制拽到底部。
   function scrollIfNearBottom() { if (settings.auto && isNearBottom()) chatEl.scrollTop = chatEl.scrollHeight; }
+  function formatDuration(ms) {
+    ms = Number(ms) || 0;
+    if (ms < 1000) return ms + "ms";
+    if (ms < 60000) return (ms / 1000).toFixed(1) + "s";
+    var m = Math.floor(ms / 60000);
+    var s = ((ms % 60000) / 1000).toFixed(1);
+    return m + "m " + s + "s";
+  }
   function copyText(text) {
     if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text);
     return new Promise(function (resolve) {
@@ -584,6 +706,40 @@
     });
   }
   function autoGrow() { inputEl.style.height = "auto"; inputEl.style.height = Math.min(inputEl.scrollHeight, 140) + "px"; }
+
+  // ---- 图表渲染（Canvas） ----
+  // 从文本中提取 <chart>...</chart> 块，返回图表规格数组和去掉标签后的文本。
+  function extractChartBlocks(text) {
+    var specs = [];
+    if (!text) return { text: text, specs: specs };
+    var cleaned = text.replace(/<chart>\s*([\s\S]*?)\s*<\/chart>/gi, function (_, inner) {
+      try {
+        var spec = JSON.parse(inner.trim());
+        if (spec && spec.type && spec.categories && spec.series) {
+          specs.push(spec);
+          return "";
+        }
+      } catch (e) {}
+      return inner;
+    });
+    return { text: cleaned.trim(), specs: specs };
+  }
+  // 在指定 bubble 中追加一个图表 canvas。
+  function appendChart(bubble, spec) {
+    var cv = document.createElement("canvas"); cv.className = "chart block";
+    bubble.appendChild(cv);
+    charts.push({ canvas: cv, spec: spec });
+    (function (canvas, s) {
+      function tryDraw() {
+        if (canvas.clientWidth && canvas.clientHeight) {
+          drawChart(canvas, s);
+        } else {
+          requestAnimationFrame(tryDraw);
+        }
+      }
+      requestAnimationFrame(tryDraw);
+    })(cv, spec);
+  }
 
   function renderMarkdown(text) {
     var src = escapeHtml(text || "");
@@ -628,6 +784,8 @@
     var ctx = canvas.getContext("2d");
     var dpr = window.devicePixelRatio || 1;
     var w = canvas.clientWidth, h = canvas.clientHeight;
+    // canvas 尚未完成布局（宽/高为 0）时先不绘制，避免拿到空画布。
+    if (!w || !h) return;
     canvas.width = w * dpr; canvas.height = h * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
@@ -663,15 +821,38 @@
 
     var cats = spec.categories || [];
     var series = spec.series || [];
-    var maxV = 0;
-    series.forEach(function (s) { (s.data || []).forEach(function (v) { if (v > maxV) maxV = v; }); });
-    if (maxV === 0) maxV = 1;
+    // 双 Y 轴：当恰好两条 series 时，分别使用左侧/右侧坐标轴，避免不同量纲（如订单数 vs 金额）被压扁到同一条轴上。
+    var dualAxis = series.length === 2;
+    var maxVs = [];
+    if (dualAxis) {
+      maxVs = series.map(function (s) {
+        var max = 0;
+        (s.data || []).forEach(function (v) { if (v > max) max = v; });
+        return max || 1;
+      });
+      padR = 44; // 为右侧 Y 轴留空
+    } else {
+      var maxV = 0;
+      series.forEach(function (s) { (s.data || []).forEach(function (v) { if (v > maxV) maxV = v; }); });
+      maxV = maxV || 1;
+      maxVs = [maxV];
+    }
+    var plotW = w - padL - padR;
+
     ctx.strokeStyle = grid; ctx.fillStyle = axis; ctx.font = "10px sans-serif"; ctx.textAlign = "right";
     var ticks = 4;
     for (var t = 0; t <= ticks; t++) {
       var y = padT + plotH - (plotH * t / ticks);
       ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(w - padR, y); ctx.stroke();
-      ctx.fillText(Math.round(maxV * t / ticks), padL - 6, y + 3);
+      ctx.fillText(Math.round(maxVs[0] * t / ticks), padL - 6, y + 3);
+    }
+    // 右侧 Y 轴
+    if (dualAxis) {
+      ctx.textAlign = "left";
+      for (var t = 0; t <= ticks; t++) {
+        var y = padT + plotH - (plotH * t / ticks);
+        ctx.fillText(Math.round(maxVs[1] * t / ticks), w - padR + 6, y + 3);
+      }
     }
     ctx.textAlign = "center";
     var step = cats.length ? plotW / cats.length : 0;
@@ -681,24 +862,25 @@
     });
     series.forEach(function (s, si) {
       var color = PALETTE[si % PALETTE.length];
+      var max = maxVs[dualAxis ? si : 0];
       if (spec.type === "line") {
         ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.beginPath();
         (s.data || []).forEach(function (v, i) {
           var x = padL + step * (i + 0.5);
-          var y = padT + plotH - (v / maxV) * plotH;
+          var y = padT + plotH - (v / max) * plotH;
           if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
         });
         ctx.stroke();
         (s.data || []).forEach(function (v, i) {
           var x = padL + step * (i + 0.5);
-          var y = padT + plotH - (v / maxV) * plotH;
+          var y = padT + plotH - (v / max) * plotH;
           ctx.fillStyle = color; ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill();
         });
       } else {
         var bw = step * 0.6 / Math.max(series.length, 1);
         (s.data || []).forEach(function (v, i) {
           var x = padL + step * (i + 0.5) - bw / 2 + si * bw;
-          var bh = (v / maxV) * plotH;
+          var bh = (v / max) * plotH;
           var y = padT + plotH - bh;
           ctx.fillStyle = color; ctx.fillRect(x, y, bw * 0.92, bh);
         });
@@ -708,6 +890,39 @@
   function redrawCharts() { charts.forEach(function (c) { drawChart(c.canvas, c.spec); }); }
   var rzTimer;
   window.addEventListener("resize", function () { clearTimeout(rzTimer); rzTimer = setTimeout(redrawCharts, 120); });
+
+  // 渲染图表、数据表格、SQL 等富结果；流式结束和历史回放都会复用。
+  function renderExtras(bubble, res) {
+    if (settings.enableChart !== false && res.chart) {
+      appendChart(bubble, res.chart);
+    }
+    if (res.rows && res.rows.length) bubble.appendChild(buildTable(res.rows, "block"));
+    if (res.sql) {
+      var sql = document.createElement("div"); sql.className = "sql block";
+      var header = document.createElement("div"); header.className = "sql-header";
+      var lab = document.createElement("div"); lab.className = "sql-label"; lab.textContent = "执行 SQL";
+      var toggle = document.createElement("button"); toggle.className = "sql-toggle"; toggle.type = "button"; toggle.textContent = "展开 ▾";
+      header.appendChild(lab); header.appendChild(toggle);
+      var body = document.createElement("div"); body.className = "sql-body";
+      var pre = document.createElement("pre"); pre.textContent = res.sql;
+      body.appendChild(pre); sql.appendChild(header); sql.appendChild(body); bubble.appendChild(sql);
+      addCopyButtons(body);
+      header.onclick = function (e) {
+        if (e.target.closest(".copy-btn")) return;
+        var expanded = sql.classList.toggle("expanded");
+        toggle.textContent = expanded ? "收起 ▴" : "展开 ▾";
+      };
+    }
+    if (settings.showDuration !== false && (res.total_duration || res.llm_duration || res.tool_duration)) {
+      var stats = document.createElement("div"); stats.className = "stats block";
+      var parts = [];
+      if (res.total_duration) parts.push("总耗时 " + formatDuration(res.total_duration));
+      if (res.llm_duration) parts.push("模型 " + formatDuration(res.llm_duration));
+      if (res.tool_duration) parts.push("工具 " + formatDuration(res.tool_duration));
+      stats.textContent = parts.join(" · ");
+      bubble.appendChild(stats);
+    }
+  }
 
   function buildTable(rows, cls) {
     var wrap = document.createElement("div"); wrap.className = "table-wrap " + (cls || "");
@@ -737,30 +952,26 @@
     return wrap;
   }
 
-  function renderAssistant(res) {
+  function buildAssistantRow(res) {
     var row = document.createElement("div"); row.className = "row assistant";
     var av = document.createElement("div"); av.className = "avatar"; av.textContent = "AI";
     var bubble = document.createElement("div"); bubble.className = "bubble";
 
+    // 先尝试从回答文本中提取 <chart>...</chart> 块，并把剩下的文本渲染为 Markdown。
+    var extracted = extractChartBlocks(res.answer || "");
     var md = document.createElement("div"); md.className = "md";
-    md.innerHTML = renderMarkdown(res.answer || "(无文字结论)");
+    md.innerHTML = renderMarkdown(extracted.text || "(无文字结论)");
     addCopyButtons(md);
     bubble.appendChild(md);
 
-    if (res.chart) {
-      var cv = document.createElement("canvas"); cv.className = "chart block";
-      bubble.appendChild(cv);
-      charts.push({ canvas: cv, spec: res.chart });
-      setTimeout(function () { drawChart(cv, res.chart); }, 0);
+    // 来自结构化结果的图表（render_chart 工具产物）。
+    renderExtras(bubble, res);
+
+    // 来自回答文本中 <chart> 标签的图表（兜底，防止模型把 JSON 直接写进文字）。
+    if (settings.enableChart !== false) {
+      extracted.specs.forEach(function (spec) { appendChart(bubble, spec); });
     }
-    if (res.rows && res.rows.length) bubble.appendChild(buildTable(res.rows, "block"));
-    if (res.sql) {
-      var sql = document.createElement("div"); sql.className = "sql block";
-      var lab = document.createElement("div"); lab.className = "sql-label"; lab.textContent = "执行 SQL";
-      var pre = document.createElement("pre"); pre.textContent = res.sql;
-      sql.appendChild(lab); sql.appendChild(pre); bubble.appendChild(sql);
-      addCopyButtons(sql);
-    }
+
     if (res.steps && res.steps.length) {
       var steps = document.createElement("div"); steps.className = "steps block";
       var btn = document.createElement("button"); btn.className = "steps-toggle";
@@ -769,7 +980,8 @@
       var body = document.createElement("div"); body.className = "steps-body"; body.style.display = show ? "flex" : "none";
       res.steps.forEach(function (s) {
         var st = document.createElement("div"); st.className = "step";
-        var tool = document.createElement("div"); tool.className = "step-tool"; tool.textContent = "🔧 " + s.tool;
+        var tool = document.createElement("div"); tool.className = "step-tool";
+        tool.textContent = "🔧 " + s.tool + (settings.showDuration !== false && s.duration ? " · " + formatDuration(s.duration) : "");
         var a = document.createElement("pre"); a.className = "step-args"; a.textContent = s.args;
         var r = document.createElement("pre"); r.className = "step-result"; r.textContent = s.result;
         st.appendChild(tool); st.appendChild(a); st.appendChild(r);
@@ -793,16 +1005,26 @@
       steps.appendChild(btn); steps.appendChild(body); bubble.appendChild(steps);
     }
     row.appendChild(av); row.appendChild(bubble);
-    chatEl.appendChild(row); scrollBottom();
+    return row;
   }
 
-  function addUser(text) {
+  function renderAssistant(res) {
+    chatEl.appendChild(buildAssistantRow(res));
+    scrollBottom();
+  }
+
+  function buildUserRow(text) {
     var row = document.createElement("div"); row.className = "row user";
     var av = document.createElement("div"); av.className = "avatar"; av.textContent = "我";
     var bubble = document.createElement("div"); bubble.className = "bubble";
     bubble.textContent = text;
     row.appendChild(av); row.appendChild(bubble);
-    chatEl.appendChild(row); scrollBottom();
+    return row;
+  }
+
+  function addUser(text) {
+    chatEl.appendChild(buildUserRow(text));
+    scrollBottom();
   }
   function addTyping() {
     if (document.getElementById("typing")) return; // 已在思考中则避免重复
@@ -840,6 +1062,7 @@
     if (settings.temperature > 0) body.temperature = settings.temperature;
     if (settings.max_tokens > 0) body.max_tokens = settings.max_tokens;
     if (settings.enableChart === false) body.enable_chart = false; // 关闭图表输出时显式告知后端
+    if (userPrompt) body.user_prompt = userPrompt; // 携带用户自定义提示词
 
     // 流式请求：边处理边渲染，避免长任务下页面假死、回答被截断。
     fetch("/api/ask", {
@@ -915,7 +1138,11 @@
           try { ev = JSON.parse(line); } catch (e) { continue; }
           if (ev.kind === "meta") {
             convId = ev.conversation_id;
-            if (convId && convId !== currentConv) { currentConv = convId; loadConversations(); }
+            if (convId && convId !== currentConv) {
+              currentConv = convId;
+              localStorage.setItem(CONV_KEY, convId);
+              loadConversations();
+            }
           } else if (ev.kind === "thinking") {
             // LLM 正在思考：保持“思考中”指示，避免像卡死；
             // 若已被真实事件清掉，则重新显示（多轮/多次思考场景）。
@@ -938,7 +1165,7 @@
             }
             stepsBody.appendChild(ps);
             pendingStep = ps;
-            if (stepsBody.style.display === "none") { stepsBody.style.display = "flex"; } // 调用中默认展开，便于看到进度
+            if (settings.showSteps !== false && stepsBody.style.display === "none") { stepsBody.style.display = "flex"; } // 调用中默认展开，便于看到进度
             stepsBtn.textContent = (stepsBody.style.display !== "none" ? "收起" : "查看") + "分析过程（" + stepsCount + " 步）";
             scrollIfNearBottom();
           } else if (ev.kind === "step_progress") {
@@ -947,35 +1174,70 @@
               pendingStep._wait.textContent = ev.step.progress;
               scrollIfNearBottom();
             }
+          } else if (ev.kind === "step_result_delta") {
+            // 工具结果流式片段：逐步把结果文字拼到"调用中"卡片里，像打字机一样。
+            removeTyping();
+            if (pendingStep) {
+              var rr = pendingStep.querySelector(".step-result-delta");
+              if (!rr) {
+                rr = document.createElement("pre");
+                rr.className = "step-result-delta step-result";
+                pendingStep.appendChild(rr);
+              }
+              rr.textContent += (ev.step && ev.step.result) || "";
+              scrollIfNearBottom();
+            }
           } else if (ev.kind === "step") {
             removeTyping();   // 首个真实事件到达，移除"思考中"
             ensureSteps();
             var st;
+            var rr;
             if (pendingStep) {
-              // 复用"调用中"卡片，原地更新为完成态（去掉 spinner/调用中，填入参数与结果）。
+              // 复用"调用中"卡片，原地更新为完成态；保留 step_result_delta 已流式展示的结果片段。
               st = pendingStep; pendingStep = null;
-              if (st._wait) { st._wait.textContent = ""; st._wait.style.display = "none"; } // 清除"调用中"提示
+              if (st._wait) { st._wait.textContent = ""; st._wait.style.display = "none"; }
+              var toolEl = st.querySelector(".step-tool");
+              if (toolEl) { toolEl.textContent = "🔧 " + (ev.step.tool || "") + (settings.showDuration !== false && ev.step.duration ? " · " + formatDuration(ev.step.duration) : ""); }
+              st.className = "step";
+              rr = st.querySelector(".step-result-delta");
+              if (rr) {
+                rr.className = "step-result";
+                rr.textContent = ev.step.result || "";
+                if (!st.querySelector(".step-args") && ev.step.args) {
+                  var a = document.createElement("pre"); a.className = "step-args"; a.textContent = ev.step.args;
+                  st.insertBefore(a, rr);
+                }
+              } else {
+                st.innerHTML = "";
+                var tool = document.createElement("div"); tool.className = "step-tool";
+                tool.textContent = "🔧 " + (ev.step.tool || "") + (settings.showDuration !== false && ev.step.duration ? " · " + formatDuration(ev.step.duration) : "");
+                var a = document.createElement("pre"); a.className = "step-args"; a.textContent = ev.step.args || "";
+                rr = document.createElement("pre"); rr.className = "step-result"; rr.textContent = ev.step.result || "";
+                st.appendChild(tool); st.appendChild(a); st.appendChild(rr);
+              }
             } else {
               stepsCount++;
               st = document.createElement("div"); st.className = "step";
               stepsBody.appendChild(st);
+              st.innerHTML = "";
+              var tool = document.createElement("div"); tool.className = "step-tool";
+              tool.textContent = "🔧 " + (ev.step.tool || "") + (settings.showDuration !== false && ev.step.duration ? " · " + formatDuration(ev.step.duration) : "");
+              var a = document.createElement("pre"); a.className = "step-args"; a.textContent = ev.step.args || "";
+              rr = document.createElement("pre"); rr.className = "step-result"; rr.textContent = ev.step.result || "";
+              st.appendChild(tool); st.appendChild(a); st.appendChild(rr);
             }
-            st.className = "step";
-            st.innerHTML = "";
-            var tool = document.createElement("div"); tool.className = "step-tool"; tool.textContent = "🔧 " + (ev.step.tool || "");
-            var a = document.createElement("pre"); a.className = "step-args"; a.textContent = ev.step.args || "";
-            // 结果不截断：完整展示；过长时限高滚动并提供"展开全部"。
-            var rr = document.createElement("pre"); rr.className = "step-result"; rr.textContent = ev.step.result || "";
-            st.appendChild(tool); st.appendChild(a); st.appendChild(rr);
             (function (resultEl) {
               // 内容超出限高才提供展开入口，避免短结果出现无意义按钮。
               if (resultEl.scrollHeight > resultEl.clientHeight + 4) {
-                var more = document.createElement("span"); more.className = "step-more"; more.textContent = "展开全部 ▾";
-                more.onclick = function () {
-                  var open = resultEl.classList.toggle("expanded");
-                  more.textContent = open ? "收起 ▴" : "展开全部 ▾";
-                };
-                st.appendChild(more);
+                var existingMore = st.querySelector(".step-more");
+                if (!existingMore) {
+                  var more = document.createElement("span"); more.className = "step-more"; more.textContent = "展开全部 ▾";
+                  more.onclick = function () {
+                    var open = resultEl.classList.toggle("expanded");
+                    more.textContent = open ? "收起 ▴" : "展开全部 ▾";
+                  };
+                  st.appendChild(more);
+                }
               }
             })(rr);
             stepsBtn.textContent = (stepsBody.style.display !== "none" ? "收起" : "查看") + "分析过程（" + stepsCount + " 步）";
@@ -992,6 +1254,12 @@
             ensureMsg();
             mdText = ev.text || "";
             if (mdEl) { mdEl.classList.remove("streaming"); mdEl.innerHTML = renderMarkdown(mdText); addCopyButtons(mdEl); }
+            scrollIfNearBottom();
+          } else if (ev.kind === "result") {
+            // 流式结束时后端推送完整结构化结果（chart/rows/sql/steps），补上富展示。
+            removeTyping();
+            ensureMsg();
+            renderExtras(msgBubble, ev);
             scrollIfNearBottom();
           } else if (ev.kind === "error") {
             if (mdEl) mdEl.classList.remove("streaming");
@@ -1059,18 +1327,22 @@
   var elMax = document.getElementById("setMax");
   var elSteps = document.getElementById("setSteps");
   var elChart = document.getElementById("setChart");
+  var elDuration = document.getElementById("setDuration");
   var elTheme = document.getElementById("setTheme");
   var elAuto = document.getElementById("setAuto");
+  var elPrompt = document.getElementById("setPrompt");
 
   function syncSettingsToUI() {
     elModel.value = settings.model || "";
     elTemp.value = settings.temperature || 0;
     elTempVal.textContent = (settings.temperature || 0).toFixed(2);
     elMax.value = settings.max_tokens || 0;
-    elSteps.checked = !!settings.showSteps;
+    elSteps.checked = settings.showSteps !== false;
     elChart.checked = settings.enableChart !== false;
+    elDuration.checked = settings.showDuration !== false;
     elTheme.value = settings.theme || "auto";
     elAuto.checked = settings.auto !== false;
+    elPrompt.value = userPrompt || "";
   }
   function openDrawer() { overlay.classList.add("show"); drawer.classList.add("show"); }
   function closeDrawer() { overlay.classList.remove("show"); drawer.classList.remove("show"); }
@@ -1083,19 +1355,23 @@
     settings.max_tokens = parseInt(elMax.value, 10) || 0;
     settings.showSteps = elSteps.checked;
     settings.enableChart = elChart.checked;
+    settings.showDuration = elDuration.checked;
     settings.theme = elTheme.value || "auto";
     settings.auto = elAuto.checked;
+    userPrompt = elPrompt.value.trim();
     saveSettings(); applyTheme(); closeDrawer();
+    // 保存用户提示词到后端（静默失败）
+    api("/api/me/prompt", { method: "POST", body: { prompt: userPrompt } }).catch(function () {});
   };
   document.getElementById("resetSettings").onclick = function () {
-    settings = { model: "", temperature: 0, max_tokens: 0, showSteps: false, enableChart: true, theme: "auto", auto: true };
+    settings = { model: "", temperature: 0, max_tokens: 0, showSteps: true, enableChart: true, showDuration: true, theme: "auto", auto: true };
     saveSettings(); syncSettingsToUI(); applyTheme();
   };
   elTemp.oninput = function () { elTempVal.textContent = parseFloat(elTemp.value).toFixed(2); };
 
   // 初始化
   applyTheme();
-  syncSettingsToUI();
+  loadGlobalUI().then(syncSettingsToUI).catch(syncSettingsToUI);
   autoGrow();
   // 默认主题下跟随系统深色/浅色偏好实时切换
   if (window.matchMedia) {

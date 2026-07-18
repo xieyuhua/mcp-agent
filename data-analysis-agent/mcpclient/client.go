@@ -32,8 +32,10 @@ type Transport interface {
 }
 
 // Client 对外暴露的 MCP 客户端，内部委托给具体 Transport。
+// CallTool 使用内部互斥锁串行化，避免 stdio 多 goroutine 写子进程 stdin 造成 JSON-RPC 混乱。
 type Client struct {
-	t Transport
+	t  Transport
+	mu sync.Mutex
 }
 
 // Tools 返回工具清单。
@@ -52,6 +54,8 @@ func (c *Client) HasTool(name string) bool {
 // CallTool 调用一个 MCP 工具，返回文本结果；isError 指示工具执行是否报错。
 // onProgress 非 nil 时，工具执行期间的进度通知（notifications/progress）会经其回调（如已读取行数）。
 func (c *Client) CallTool(name string, args map[string]interface{}, onProgress func(message string)) (text string, isError bool, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	logger.Infof("[mcp] 请求工具调用: %s 参数=%s", name, logger.Sanitize(fmt.Sprintf("%v", args)))
 	var out struct {
 		Content []struct {
@@ -218,10 +222,13 @@ func (t *stdioTransport) Notify(method string, params interface{}) error {
 }
 
 func (t *stdioTransport) Call(method string, params interface{}, out interface{}, onProgress func(message string)) error {
+	// stdio 传输必须完全串行化：写 stdin + 读 stdout 成一个原子请求，
+	// 否则多 goroutine 并发调用会相互交错，导致 JSON-RPC 响应混乱。
 	t.mu.Lock()
+	defer t.mu.Unlock()
+
 	t.nextID++
 	id := t.nextID
-	t.mu.Unlock()
 
 	req := map[string]interface{}{
 		"jsonrpc": "2.0",

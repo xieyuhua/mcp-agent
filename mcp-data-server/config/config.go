@@ -29,16 +29,19 @@ type Config struct {
 	// false：进入“系统环境”模式，允许访问任意绝对路径（相对路径相对进程工作目录），
 	// 适用于受信任的内网部署，但请谨慎——文件工具将能读写服务器上的任意文件。
 	SandboxEnabled bool `json:"sandbox_enabled"`
+
+	// SearchProvider 联网搜索提供商：duckduckgo（默认）| bing | auto（优先 DuckDuckGo，失败回退 Bing）。
+	SearchProvider string `json:"search_provider"`
 }
 
 // Load 加载配置：先读文件，再用环境变量覆盖。
 func Load(path string) (*Config, error) {
 	c := &Config{
-		DBDialect:     "sqlite",
-		DBDSN:         "./data.db",
-		JWTSecret:     "change-me-in-production",
-		MaskEnabled:   true,
-		SeedDemo:      true,
+		DBDialect:      "sqlite",
+		DBDSN:          "./data.db",
+		JWTSecret:      "change-me-in-production",
+		MaskEnabled:    true,
+		SeedDemo:       true,
 		SandboxEnabled: true, // 默认启用沙箱，文件工具只能访问 WorkDir 内
 	}
 	if path == "" {
@@ -82,6 +85,9 @@ func Load(path string) (*Config, error) {
 	}
 	if v := os.Getenv("SANDBOX_ENABLED"); v != "" {
 		c.SandboxEnabled = v == "true" || v == "1" || v == "yes"
+	}
+	if v := os.Getenv("SEARCH_PROVIDER"); v != "" {
+		c.SearchProvider = v
 	}
 	return c, nil
 }

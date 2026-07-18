@@ -1,28 +1,52 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>数据分析助手 · 后台配置</title>
+<title id="pageTitle">数据分析助手 · 后台配置</title>
 <style>
   :root {
     --bg: #0f172a; --panel: #1e293b; --panel2: #273449; --border: #334155;
     --text: #e2e8f0; --muted: #94a3b8; --primary: #6366f1; --primary2: #818cf8;
     --ok: #22c55e; --err: #ef4444; --warn: #f59e0b;
   }
+  [data-theme="light"] {
+    --bg: #f8fafc; --panel: #ffffff; --panel2: #f1f5f9; --border: #e2e8f0;
+    --text: #1e293b; --muted: #64748b; --primary: #4f46e5; --primary2: #6366f1;
+    --ok: #16a34a; --err: #dc2626; --warn: #d97706;
+  }
+  [data-theme="auto"] {
+    --bg: #0f172a; --panel: #1e293b; --panel2: #273449; --border: #334155;
+    --text: #e2e8f0; --muted: #94a3b8; --primary: #6366f1; --primary2: #818cf8;
+    --ok: #22c55e; --err: #ef4444; --warn: #f59e0b;
+  }
+  @media (prefers-color-scheme: light) {
+    [data-theme="auto"] {
+      --bg: #f8fafc; --panel: #ffffff; --panel2: #f1f5f9; --border: #e2e8f0;
+      --text: #1e293b; --muted: #64748b; --primary: #4f46e5; --primary2: #6366f1;
+      --ok: #16a34a; --err: #dc2626; --warn: #d97706;
+    }
+  }
   * { box-sizing: border-box; }
   body { margin: 0; font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
-    background: var(--bg); color: var(--text); }
-  header { padding: 16px 24px; border-bottom: 1px solid var(--border); display: flex;
-    align-items: center; justify-content: space-between; background: var(--panel); }
+    background: var(--bg); color: var(--text); transition: background .15s, color .15s; }
+  header { padding: 14px 24px; border-bottom: 1px solid var(--border); display: flex;
+    align-items: center; justify-content: space-between; background: var(--panel);
+    position: sticky; top: 0; z-index: 10; flex-wrap: wrap; gap: 10px; }
   header h1 { font-size: 18px; margin: 0; }
-  header .meta { font-size: 13px; color: var(--muted); }
-  .wrap { max-width: 980px; margin: 24px auto; padding: 0 16px; }
+  header .brand-text { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  header .meta { font-size: 13px; color: var(--muted); display: flex; align-items: center; }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 20px 16px 100px; }
   .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
     padding: 18px 20px; margin-bottom: 18px; }
   .card h2 { font-size: 15px; margin: 0 0 14px; color: var(--primary2);
     border-left: 3px solid var(--primary); padding-left: 10px; }
-  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 18px; }
+  .tip { background: rgba(99,102,241,0.08); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 14px; font-size: 12px; color: var(--muted); margin-bottom: 18px; }
+  .actions-bar { display: flex; gap: 12px; justify-content: flex-end; margin-top: 8px;
+    position: fixed; bottom: 0; left: 0; right: 0; background: var(--panel); padding: 12px 24px;
+    border-top: 1px solid var(--border); z-index: 10; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px 18px; }
   .field { display: flex; flex-direction: column; gap: 6px; }
   .field.full { grid-column: 1 / -1; }
   label { font-size: 13px; color: var(--muted); }
@@ -43,6 +67,11 @@
     padding: 10px 18px; border-radius: 8px; font-size: 14px; display: none; z-index: 99; }
   #toast.ok { background: #064e3b; color: var(--ok); border: 1px solid var(--ok); }
   #toast.err { background: #450a0a; color: var(--err); border: 1px solid var(--err); }
+  @media (max-width: 600px) {
+    .grid { grid-template-columns: 1fr; }
+    header { flex-wrap: wrap; gap: 8px; }
+    .tabs { overflow-x: auto; width: 100%; }
+  }
   /* 登录遮罩 */
   #login { position: fixed; inset: 0; background: rgba(15,23,42,.96); display: flex;
     align-items: center; justify-content: center; z-index: 100; }
@@ -50,6 +79,43 @@
   #login h2 { color: var(--text); text-align: center; margin-bottom: 20px; }
   .hidden { display: none !important; }
   code { background: var(--panel2); padding: 1px 6px; border-radius: 4px; font-size: 12px; }
+  /* 选项卡 */
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 18px;
+    background: var(--panel); position: sticky; top: 64px; z-index: 9; padding: 6px 16px; }
+  .tab { padding: 9px 16px; border-radius: 8px 8px 0 0; cursor: pointer; font-size: 13px;
+    color: var(--muted); border: 1px solid transparent; border-bottom: none;
+    background: transparent; transition: .12s; white-space: nowrap; }
+  .tab:hover { color: var(--text); background: var(--panel2); }
+  .tab.active { color: var(--text); background: var(--bg); border-color: var(--border);
+    border-bottom: 1px solid var(--bg); margin-bottom: -1px; font-weight: 600; }
+  .tab-panels .panel { display: none; }
+  .tab-panels .panel.active { display: block; }
+  .preview { padding: 12px 14px; border: 1px dashed var(--border); border-radius: 8px; margin-bottom: 16px; }
+  .preview h3 { margin: 0 0 4px; font-size: 15px; color: var(--text); }
+  .preview p { margin: 0; font-size: 12px; color: var(--muted); }
+  .preview .steps { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; font-size: 12px; color: var(--muted); }
+  .preview .steps span { display: flex; align-items: center; gap: 8px; }
+  .preview .steps i { color: var(--primary); font-style: normal; }
+  /* 表格与分页 */
+  .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 10px 12px; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
+  th { background: var(--panel2); color: var(--muted); font-weight: 500; }
+  tr:last-child td { border-bottom: none; }
+  td.wrap { white-space: normal; max-width: 400px; }
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; background: var(--panel2); border: 1px solid var(--border); }
+  .tag.disabled { background: rgba(239,68,68,0.12); border-color: var(--err); color: var(--err); }
+  .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .pagination { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; align-items: center; }
+  .pagination button { padding: 6px 12px; font-size: 12px; }
+  .pagination button:disabled { opacity: .5; cursor: not-allowed; }
+  .pagination .info { font-size: 12px; color: var(--muted); }
+  .modal { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none; align-items: center; justify-content: center; z-index: 101; }
+  .modal.active { display: flex; }
+  .modal-box { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; width: 420px; max-width: 92%; padding: 20px; }
+  .modal-title { font-size: 16px; margin: 0 0 16px; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+  .panel-title { font-size: 15px; font-weight: 600; color: var(--text); }
 </style>
 </head>
 <body>
@@ -73,82 +139,190 @@
 </div>
 
 <header>
-  <h1>数据分析助手 · 后台配置</h1>
+  <div>
+    <h1 id="appTitle">数据分析助手 · 后台配置</h1>
+    <div class="brand-text" id="appSubtitle">自然语言 → LLM → MCP 权限 → SQL → 图表分析</div>
+  </div>
   <div class="meta">
     <span id="who"></span>
     <button class="btn ghost" style="margin-left:12px;padding:6px 12px;font-size:12px" onclick="logout()">退出</button>
   </div>
 </header>
 
+<div class="tabs" id="tabs"></div>
+
 <div class="wrap" id="app">
-  <div id="forms"></div>
-  <div class="actions" style="justify-content:flex-end">
+  <div class="tip">
+    💡 所有配置修改后即时热应用，无需重启服务。恢复默认将清空数据库中的自定义配置并写入内置默认值。
+  </div>
+  <div id="forms" class="tab-panels">
+    <div id="configPanels"></div>
+
+    <!-- 用户管理 -->
+    <div class="panel" data-tab="用户管理">
+      <div class="tip">
+        💡 在此管理前端注册用户：新增、导入、禁用/启用、改密、分配角色。角色可在下方「角色管理」区域动态维护。
+      </div>
+      <div class="card">
+        <div class="panel-title" style="margin:0 0 14px">用户管理</div>
+        <div class="toolbar" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px">
+          <input id="userSearch" placeholder="搜索用户名" style="width:180px" />
+          <select id="userRoleFilter" style="width:140px"><option value="">全部角色</option></select>
+          <button class="btn" onclick="loadUsers()">刷新</button>
+          <button class="btn primary" onclick="openUserModal()">+ 新增用户</button>
+          <label class="btn" style="position:relative;overflow:hidden">
+            导入 CSV
+            <input id="userImport" type="file" accept=".csv" style="position:absolute;inset:0;opacity:0;cursor:pointer" />
+          </label>
+          <button class="btn" onclick="exportUsers()">导出 CSV</button>
+        </div>
+        <div class="table-wrap">
+          <table id="userTable">
+            <thead>
+              <tr><th>用户名</th><th>角色</th><th>状态</th><th>创建时间</th><th>更新时间</th><th>操作</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="pagination" id="userPagination"></div>
+      </div>
+      <div class="card" style="margin-top:18px">
+        <div class="panel-title" style="margin:0 0 14px">角色管理</div>
+        <div class="toolbar" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px">
+          <button class="btn" onclick="loadRoles()">刷新</button>
+          <button class="btn primary" onclick="openRoleModal()">+ 新增角色</button>
+        </div>
+        <div class="table-wrap">
+          <table id="roleTable">
+            <thead>
+              <tr><th>标识</th><th>显示名称</th><th>描述</th><th>内置</th><th>操作</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- 沟通日志 -->
+    <div class="panel" data-tab="沟通日志">
+      <div class="tip">
+        💡 查询所有用户与助手的沟通记录，支持按用户名、角色、关键词、时间范围筛选。
+      </div>
+      <div class="card">
+        <div class="panel-title" style="margin:0 0 14px">沟通日志</div>
+        <div class="toolbar" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px">
+          <input id="logUsername" placeholder="用户名" style="width:140px" />
+          <select id="logRole" style="width:120px">
+            <option value="">全部角色</option>
+            <option value="user">user</option>
+            <option value="assistant">assistant</option>
+          </select>
+          <input id="logKeyword" placeholder="关键词" style="width:160px" />
+          <input id="logDateFrom" type="date" style="width:140px" />
+          <input id="logDateTo" type="date" style="width:140px" />
+          <button class="btn" onclick="loadChatLogs()">查询</button>
+          <button class="btn" onclick="resetLogFilter()">重置</button>
+        </div>
+        <div class="table-wrap">
+          <table id="logTable">
+            <thead>
+              <tr><th>ID</th><th>用户</th><th>角色</th><th>内容</th><th>时间</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="pagination" id="logPagination"></div>
+      </div>
+    </div>
+  </div>
+  <div class="actions-bar" id="configActions">
     <button class="btn danger" onclick="doReset()">恢复默认</button>
     <button class="btn" onclick="doSave()">保存并应用</button>
   </div>
 </div>
 
 <script>
-// 字段元数据：分组、标签、类型、选项。
+// 字段元数据：tab（选项卡）、group（卡片分组）、key、label、type、选项等。
 const SCHEMA = [
-  { group: "LLM 大模型", key: "llm.provider", label: "提供方", type: "select",
+  { tab: "品牌与界面", group: "品牌信息", key: "ui.app_title", label: "应用标题", type: "text", desc: "显示在顶部与浏览器标签，例如“数据分析助手”" },
+  { tab: "品牌与界面", group: "品牌信息", key: "ui.app_subtitle", label: "应用描述", type: "text", desc: "顶部副标题或描述" },
+  { tab: "品牌与界面", group: "品牌信息", key: "ui.workflow_steps", label: "前台流程步骤", type: "textarea", full: true,
+    desc: "用“→”分隔，例如：自然语言 → LLM → MCP 权限 → SQL → 图表分析" },
+  { tab: "品牌与界面", group: "外观", key: "ui.theme", label: "后台主题", type: "select",
+    options: [["dark","深色"],["light","浅色"],["auto","跟随系统"]] },
+  { tab: "品牌与界面", group: "前端展示", key: "ui.show_duration", label: "展示耗时统计", type: "checkbox",
+    desc: "在助手回答下方展示总耗时、模型耗时、工具耗时" },
+  { tab: "品牌与界面", group: "前端展示", key: "ui.show_steps", label: "展示分析过程", type: "checkbox",
+    desc: "在回答中展示工具调用步骤（分析过程）" },
+  { tab: "品牌与界面", group: "前端展示", key: "ui.show_images", label: "展示图片/图表", type: "checkbox",
+    desc: "在回答中展示生成的图表/图片" },
+
+  { tab: "LLM 大模型", group: "LLM 大模型", key: "llm.provider", label: "提供方", type: "select",
     options: [["ollama","ollama"],["openai","openai"]] },
-  { group: "LLM 大模型", key: "llm.base_url", label: "服务地址", type: "text",
+  { tab: "LLM 大模型", group: "LLM 大模型", key: "llm.base_url", label: "服务地址", type: "text",
     desc: "如 http://localhost:11434" },
-  { group: "LLM 大模型", key: "llm.model", label: "模型名", type: "text",
+  { tab: "LLM 大模型", group: "LLM 大模型", key: "llm.model", label: "模型名", type: "text",
     desc: "如 qwen2.5:14b / qwen3:8b" },
-  { group: "LLM 大模型", key: "llm.api_key", label: "API Key", type: "password",
+  { tab: "LLM 大模型", group: "LLM 大模型", key: "llm.api_key", label: "API Key", type: "password",
     desc: "本地 Ollama 可留空" },
-  { group: "LLM 大模型", key: "llm.temperature", label: "温度", type: "number", step: "0.1" },
-  { group: "LLM 大模型", key: "llm.max_tokens", label: "最大 Token", type: "number" },
+  { tab: "LLM 大模型", group: "LLM 大模型", key: "llm.temperature", label: "温度", type: "number", step: "0.1" },
+  { tab: "LLM 大模型", group: "LLM 大模型", key: "llm.max_tokens", label: "最大 Token", type: "number" },
 
-  { group: "MCP 对接（本地）", key: "mcp.mode", label: "对接模式", type: "select",
+  { tab: "MCP 对接", group: "MCP 对接（本地）", key: "mcp.mode", label: "对接模式", type: "select",
     options: [["local","local"],["remote","remote"]] },
-  { group: "MCP 对接（本地）", key: "mcp.server_path", label: "mcp-data-server 路径", type: "text",
+  { tab: "MCP 对接", group: "MCP 对接（本地）", key: "mcp.server_path", label: "mcp-data-server 路径", type: "text",
     desc: "local 模式拉起的可执行文件" },
-  { group: "MCP 对接（本地）", key: "mcp.db_dialect", label: "后端数据库类型", type: "select",
+  { tab: "MCP 对接", group: "MCP 对接（本地）", key: "mcp.db_dialect", label: "后端数据库类型", type: "select",
     options: [["sqlite","sqlite"],["mysql","mysql"]] },
-  { group: "MCP 对接（本地）", key: "mcp.db_dsn", label: "数据库连接串", type: "text", full: true,
+  { tab: "MCP 对接", group: "MCP 对接（本地）", key: "mcp.db_dsn", label: "数据库连接串", type: "text", full: true,
     desc: "sqlite: ./data.db ｜ mysql: user:pass@tcp(127.0.0.1:3306)/db?..." },
-  { group: "MCP 对接（本地）", key: "mcp.mask_enabled", label: "启用脱敏", type: "checkbox" },
-  { group: "MCP 对接（本地）", key: "mcp.seed_demo", label: "写入演示数据", type: "checkbox" },
-  { group: "MCP 对接（本地）", key: "mcp.sandbox_enabled", label: "启用工作目录沙箱", type: "checkbox",
+  { tab: "MCP 对接", group: "MCP 对接（本地）", key: "mcp.mask_enabled", label: "启用脱敏", type: "checkbox" },
+  { tab: "MCP 对接", group: "MCP 对接（本地）", key: "mcp.seed_demo", label: "写入演示数据", type: "checkbox" },
+  { tab: "MCP 对接", group: "MCP 对接（本地）", key: "mcp.sandbox_enabled", label: "启用工作目录沙箱", type: "checkbox",
     desc: "开启：文件工具只能访问 work_dir 内（默认，安全）；关闭：系统环境模式，可访问服务器任意绝对路径（仅受信任内网用，谨慎）" },
-  { group: "MCP 对接（本地）", key: "mcp.work_dir", label: "工作目录", type: "text",
+  { tab: "MCP 对接", group: "MCP 对接（本地）", key: "mcp.work_dir", label: "工作目录", type: "text",
     desc: "文件工具根目录（沙箱模式下限定在此；留空=进程工作目录）" },
-  { group: "MCP 对接（本地）", key: "mcp.username", label: "登录账号", type: "text" },
-  { group: "MCP 对接（本地）", key: "mcp.password", label: "登录密码", type: "password" },
+  { tab: "MCP 对接", group: "MCP 对接（本地）", key: "mcp.username", label: "登录账号", type: "text" },
+  { tab: "MCP 对接", group: "MCP 对接（本地）", key: "mcp.password", label: "登录密码", type: "password" },
 
-  { group: "MCP 对接（远程）", key: "mcp.base_url", label: "远程地址", type: "text",
+  { tab: "MCP 对接", group: "MCP 对接（远程）", key: "mcp.base_url", label: "远程地址", type: "text",
     desc: "如 http://127.0.0.1:9000/mcp" },
-  { group: "MCP 对接（远程）", key: "mcp.transport", label: "传输方式", type: "select",
+  { tab: "MCP 对接", group: "MCP 对接（远程）", key: "mcp.transport", label: "传输方式", type: "select",
     options: [["streamable-http","streamable-http"],["sse","sse"]] },
-  { group: "MCP 对接（远程）", key: "mcp.api_key", label: "远程鉴权 Key", type: "password" },
+  { tab: "MCP 对接", group: "MCP 对接（远程）", key: "mcp.api_key", label: "远程鉴权 Key", type: "password" },
+  { tab: "MCP 对接", group: "MCP 对接（远程）", key: "mcp.extra", label: "额外远程 MCP 服务", type: "textarea", full: true,
+    desc: "JSON 数组，每个元素含 name/base_url/transport/api_key/headers" },
 
-  { group: "Agent 编排", key: "agent.max_steps", label: "最大推理步数", type: "number" },
-  { group: "Agent 编排", key: "agent.use_native_tools", label: "原生工具调用", type: "checkbox" },
-  { group: "Agent 编排", key: "agent.max_result_rows", label: "结果最大行数", type: "number" },
-  { group: "Agent 编排", key: "agent.memory_max_history", label: "上下文窗口（历史条数）", type: "number",
+  { tab: "Agent 编排", group: "Agent 编排", key: "agent.max_steps", label: "最大推理步数", type: "number" },
+  { tab: "Agent 编排", group: "Agent 编排", key: "agent.use_native_tools", label: "原生工具调用", type: "checkbox" },
+  { tab: "Agent 编排", group: "Agent 编排", key: "agent.max_result_rows", label: "结果最大行数", type: "number" },
+  { tab: "Agent 编排", group: "Agent 编排", key: "agent.memory_max_history", label: "上下文窗口（历史条数）", type: "number",
     desc: "单次最多回放的历史消息条数，超出仅取最近部分。默认 30" },
-  { group: "Agent 编排", key: "agent.memory_summary_threshold", label: "摘要压缩阈值", type: "number",
+  { tab: "Agent 编排", group: "Agent 编排", key: "agent.memory_summary_threshold", label: "摘要压缩阈值", type: "number",
     desc: "历史消息数达到该值时，对早期消息做摘要压缩。默认 12" },
-  { group: "Agent 编排", key: "agent.memory_recent_keep", label: "摘要保留最近条数", type: "number",
+  { tab: "Agent 编排", group: "Agent 编排", key: "agent.memory_recent_keep", label: "摘要保留最近条数", type: "number",
     desc: "摘要压缩时保留最近 N 条原文，其余早期消息被压缩为摘要。默认 6" },
 
-  { group: "运行日志", key: "log.save_to_file", label: "保存日志到文件", type: "checkbox",
+  { tab: "系统提示词", group: "系统提示词（内置场景）", key: "prompts.builtin", label: "内置数据库分析", type: "textarea", full: true },
+  { tab: "系统提示词", group: "系统提示词（远程场景）", key: "prompts.remote", label: "远程 MCP 场景", type: "textarea", full: true },
+
+  { tab: "日志与后台", group: "运行日志", key: "log.save_to_file", label: "保存日志到文件", type: "checkbox",
     desc: "开启后把每个环节（HTTP/LLM/MCP/工具）的请求日志带时间戳写入 ./logs/agent-YYYY-MM-DD.log" },
-  { group: "运行日志", key: "log.dir", label: "日志目录", type: "text",
+  { tab: "日志与后台", group: "运行日志", key: "log.dir", label: "日志目录", type: "text",
     desc: "日志文件存放目录，默认 logs" },
-
-  { group: "系统提示词（内置场景）", key: "prompts.builtin", label: "内置数据库分析", type: "textarea", full: true },
-  { group: "系统提示词（远程场景）", key: "prompts.remote", label: "远程 MCP 场景", type: "textarea", full: true },
-
-  { group: "后台凭据", key: "admin.username", label: "后台账号", type: "text" },
-  { group: "后台凭据", key: "admin.password", label: "后台密码", type: "password" },
+  { tab: "日志与后台", group: "后台凭据", key: "admin.username", label: "后台账号", type: "text" },
+  { tab: "日志与后台", group: "后台凭据", key: "admin.password", label: "后台密码", type: "password" },
 ];
+
+const TABS = ["品牌与界面", "LLM 大模型", "MCP 对接", "Agent 编排", "系统提示词", "日志与后台", "用户管理", "沟通日志"];
+const DEFAULT_TAB = "品牌与界面";
 
 const TOKEN_KEY = "daa_admin_token";
 let VALUES = {};
+let currentTab = localStorage.getItem("daa_admin_tab") || DEFAULT_TAB;
+let userPage = 1, userTotal = 0, userSize = 20;
+let logPage = 1, logTotal = 0, logSize = 20;
+let rolesCache = [];
 
 function token() { return localStorage.getItem(TOKEN_KEY) || ""; }
 function toast(msg, ok) {
@@ -181,23 +355,103 @@ async function doLogin() {
 }
 function logout() { localStorage.removeItem(TOKEN_KEY); location.reload(); }
 
-// 按分组渲染表单
+function applyTheme() {
+  const theme = (VALUES["ui.theme"] || "dark").toLowerCase();
+  document.documentElement.setAttribute("data-theme", theme);
+}
+function updateBrandPreview() {
+  const title = VALUES["ui.app_title"] || "数据分析助手";
+  const subtitle = VALUES["ui.app_subtitle"] || "";
+  document.getElementById("appTitle").textContent = title + " · 后台配置";
+  document.getElementById("pageTitle").textContent = title + " · 后台配置";
+  document.getElementById("appSubtitle").textContent = subtitle;
+  const previewTitle = document.getElementById("previewTitle");
+  const previewSub = document.getElementById("previewSub");
+  const previewSteps = document.getElementById("previewSteps");
+  if (previewTitle) previewTitle.textContent = title;
+  if (previewSub) previewSub.textContent = subtitle;
+  if (previewSteps) renderStepsPreview(previewSteps, VALUES["ui.workflow_steps"] || "");
+}
+function renderStepsPreview(el, steps) {
+  el.innerHTML = "";
+  const parts = steps.split(/[→]/).map(s => s.trim()).filter(Boolean);
+  if (!parts.length) { el.style.display = "none"; return; }
+  el.style.display = "flex";
+  parts.forEach((p, i) => {
+    const span = document.createElement("span");
+    span.innerHTML = "<i>" + escapeHtml(p) + "</i>" + (i < parts.length - 1 ? "→" : "");
+    el.appendChild(span);
+  });
+}
+
+function renderTabs() {
+  const wrap = document.getElementById("tabs");
+  wrap.innerHTML = "";
+  TABS.forEach(tab => {
+    const btn = document.createElement("div");
+    btn.className = "tab" + (tab === currentTab ? " active" : "");
+    btn.textContent = tab;
+    btn.onclick = () => switchTab(tab);
+    wrap.appendChild(btn);
+  });
+}
+function switchTab(tab) {
+  currentTab = tab;
+  localStorage.setItem("daa_admin_tab", tab);
+  renderTabs();
+  document.querySelectorAll(".tab-panels .panel").forEach(p => {
+    p.classList.toggle("active", p.dataset.tab === tab);
+  });
+  updateConfigActions();
+  if (tab === "用户管理") { loadRoles(); loadUsers(); }
+  if (tab === "沟通日志") { loadChatLogs(); }
+}
+
 function render(values) {
   VALUES = values;
-  const groups = {};
-  SCHEMA.forEach(f => { (groups[f.group] = groups[f.group] || []).push(f); });
-  const app = document.getElementById("forms");
-  app.innerHTML = "";
-  Object.keys(groups).forEach(g => {
-    const card = document.createElement("div");
-    card.className = "card";
-    card.innerHTML = "<h2>" + g + "</h2>";
-    const grid = document.createElement("div");
-    grid.className = "grid";
-    groups[g].forEach(f => grid.appendChild(fieldEl(f, values[f.key] ?? "")));
-    card.appendChild(grid);
-    app.appendChild(card);
+  applyTheme();
+  updateBrandPreview();
+  renderTabs();
+  const panels = document.getElementById("configPanels");
+  panels.innerHTML = "";
+  const CONFIG_TABS = ["品牌与界面", "LLM 大模型", "MCP 对接", "Agent 编排", "系统提示词", "日志与后台"];
+  CONFIG_TABS.forEach(tab => {
+    const tabFields = SCHEMA.filter(f => f.tab === tab);
+    const groups = {};
+    tabFields.forEach(f => { (groups[f.group] = groups[f.group] || []).push(f); });
+    const panel = document.createElement("div");
+    panel.className = "panel" + (tab === currentTab ? " active" : "");
+    panel.dataset.tab = tab;
+
+    if (tab === "品牌与界面") {
+      const preview = document.createElement("div");
+      preview.className = "preview";
+      preview.innerHTML = '<h3 id="previewTitle">' + escapeHtml(values["ui.app_title"] || "数据分析助手") + '</h3>' +
+        '<p id="previewSub">' + escapeHtml(values["ui.app_subtitle"] || "") + '</p>' +
+        '<div class="steps" id="previewSteps"></div>';
+      panel.appendChild(preview);
+    }
+
+    Object.keys(groups).forEach(g => {
+      const card = document.createElement("div");
+      card.className = "card";
+      card.innerHTML = "<h2>" + g + "</h2>";
+      const grid = document.createElement("div");
+      grid.className = "grid";
+      groups[g].forEach(f => grid.appendChild(fieldEl(f, values[f.key] ?? "")));
+      card.appendChild(grid);
+      panel.appendChild(card);
+    });
+    panels.appendChild(panel);
   });
+  updateBrandPreview();
+  bindChange();
+  updateConfigActions();
+}
+
+function updateConfigActions() {
+  const bar = document.getElementById("configActions");
+  if (bar) bar.style.display = ["用户管理", "沟通日志"].includes(currentTab) ? "none" : "flex";
 }
 function fieldEl(f, val) {
   const wrap = document.createElement("div");
@@ -209,22 +463,38 @@ function fieldEl(f, val) {
       (val === "true" ? "checked" : "") + ' style="width:auto" />' +
       '<span class="desc">' + (f.desc || "") + '</span></div>';
   } else if (f.type === "textarea") {
-    control = '<textarea id="' + id + '">' + escapeHtml(val) + '</textarea>';
+    control = '<textarea id="' + id + '" data-key="' + f.key + '">' + escapeHtml(val) + '</textarea>';
   } else if (f.type === "select") {
     const opts = f.options.map(o => '<option value="' + o[0] + '"' +
       (o[0] === val ? " selected" : "") + '>' + o[1] + '</option>').join("");
-    control = '<select id="' + id + '">' + opts + '</select>';
+    control = '<select id="' + id + '" data-key="' + f.key + '">' + opts + '</select>';
   } else {
     const t = f.type === "password" ? "password" : (f.type === "number" ? "number" : "text");
     const step = f.step ? ' step="' + f.step + '"' : "";
     control = '<input id="' + id + '" type="' + t + '"' + step + ' value="' +
-      escapeHtml(val) + '" />' + (f.desc ? '<span class="desc">' + f.desc + '</span>' : "");
+      escapeHtml(val) + '" data-key="' + f.key + '" />' + (f.desc ? '<span class="desc">' + f.desc + '</span>' : "");
   }
   wrap.innerHTML = "<label>" + f.label + "</label>" + control;
   return wrap;
 }
+function bindChange() {
+  // 品牌字段实时预览
+  ["ui.app_title", "ui.app_subtitle", "ui.workflow_steps", "ui.theme"].forEach(k => {
+    const el = document.getElementById("f_" + k.replace(/\./g, "_"));
+    if (!el) return;
+    el.addEventListener("input", () => {
+      VALUES[k] = el.type === "checkbox" ? (el.checked ? "true" : "false") : el.value;
+      applyTheme();
+      updateBrandPreview();
+    });
+  });
+}
 function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+  return String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[c]));
+}
+function escapeAttr(s) {
+  // 用于双引号 HTML 属性中包含单引号 JS 字符串的值。
+  return String(s).replace(/[\\'"&<]/g, c => ({ "\\":"\\\\","'":"\\'","\"":"&quot;","&":"&amp;","<":"&lt;" }[c]));
 }
 function collect() {
   const out = {};
@@ -242,7 +512,9 @@ async function doSave() {
   const r = await api("/api/admin/config", "PUT", { values });
   if (r.status === 200) {
     toast("已保存并热应用 ✅", true);
-    render(values);
+    VALUES = values;
+    applyTheme();
+    updateBrandPreview();
   } else {
     toast(r.data.error || "保存失败", false);
   }
@@ -259,6 +531,14 @@ async function load() {
   const items = r.data.items || [];
   const map = {};
   items.forEach(it => map[it.key] = it.value);
+  // 新 UI 字段在旧数据库中可能不存在，默认填充。
+  if (!map["ui.theme"]) map["ui.theme"] = "dark";
+  if (!map["ui.app_title"]) map["ui.app_title"] = "数据分析助手";
+  if (!map["ui.app_subtitle"]) map["ui.app_subtitle"] = "自然语言 → LLM → MCP 权限 → SQL → 图表分析";
+  if (!map["ui.workflow_steps"]) map["ui.workflow_steps"] = "自然语言 → LLM → MCP 权限 → SQL → 图表分析";
+  ["ui.show_duration", "ui.show_steps", "ui.show_images"].forEach(k => {
+    if (!map[k]) map[k] = "true";
+  });
   render(map);
 }
 async function boot() {
@@ -269,11 +549,237 @@ async function boot() {
   const items = r.data.items || [];
   const map = {};
   items.forEach(it => map[it.key] = it.value);
+  if (!map["ui.theme"]) map["ui.theme"] = "dark";
+  if (!map["ui.app_title"]) map["ui.app_title"] = "数据分析助手";
+  if (!map["ui.app_subtitle"]) map["ui.app_subtitle"] = "自然语言 → LLM → MCP 权限 → SQL → 图表分析";
+  if (!map["ui.workflow_steps"]) map["ui.workflow_steps"] = "自然语言 → LLM → MCP 权限 → SQL → 图表分析";
+  ["ui.show_duration", "ui.show_steps", "ui.show_images"].forEach(k => {
+    if (!map[k]) map[k] = "true";
+  });
   render(map);
 }
+// ---- 用户管理 ----
+
+async function loadUsers() {
+  const search = document.getElementById("userSearch").value;
+  const role = document.getElementById("userRoleFilter").value;
+  const r = await api(`/api/admin/users?search=${encodeURIComponent(search)}&role=${encodeURIComponent(role)}&page=${userPage}&size=${userSize}`, "GET");
+  if (r.status !== 200) { toast(r.data.error || "加载用户失败", false); return; }
+  renderUsers(r.data.users || [], r.data.total || 0);
+}
+function renderUsers(users, total) {
+  userTotal = total;
+  const tbody = document.querySelector("#userTable tbody");
+  tbody.innerHTML = users.map(u => `<tr>
+    <td>${escapeHtml(u.username)}</td>
+    <td><span class="tag">${escapeHtml(u.role)}${u.display_role ? ' (' + escapeHtml(u.display_role) + ')' : ''}</span></td>
+    <td>${u.disabled ? '<span class="tag disabled">已禁用</span>' : '<span class="tag">正常</span>'}</td>
+    <td>${formatTime(u.created_at)}</td>
+    <td>${formatTime(u.updated_at)}</td>
+    <td>
+      <button class="btn ghost" style="padding:4px 10px;font-size:12px" onclick="changeUserRole('${escapeAttr(u.id)}', '${escapeAttr(u.role)}')">改角色</button>
+      <button class="btn ghost" style="padding:4px 10px;font-size:12px" onclick="openPasswordModal('${escapeAttr(u.id)}')">改密</button>
+      <button class="btn ${u.disabled ? '' : 'danger'}" style="padding:4px 10px;font-size:12px" onclick="setUserDisabled('${escapeAttr(u.id)}', ${!u.disabled})">${u.disabled ? '启用' : '禁用'}</button>
+    </td>
+  </tr>`).join("");
+  renderUserPagination();
+}
+function renderUserPagination() {
+  const totalPages = Math.max(1, Math.ceil(userTotal / userSize));
+  const el = document.getElementById("userPagination");
+  let html = '<span class="info">共 ' + userTotal + ' 条，第 ' + userPage + '/' + totalPages + ' 页</span>';
+  html += '<button class="btn" ' + (userPage <= 1 ? 'disabled' : '') + ' onclick="goUserPage(' + (userPage - 1) + ')">上一页</button>';
+  html += '<button class="btn" ' + (userPage >= totalPages ? 'disabled' : '') + ' onclick="goUserPage(' + (userPage + 1) + ')">下一页</button>';
+  el.innerHTML = html;
+}
+function goUserPage(p) { userPage = p; loadUsers(); }
+function formatTime(s) { if (!s) return "-"; const d = new Date(s); return isNaN(d) ? s : d.toLocaleString("zh-CN"); }
+
+let editingUserId = null;
+function openUserModal() { editingUserId = null; fillRoleSelect("newUserRole"); document.getElementById("userModal").classList.add("active"); }
+function closeUserModal() { document.getElementById("userModal").classList.remove("active"); }
+async function saveUser() {
+  const username = document.getElementById("newUserName").value.trim();
+  const password = document.getElementById("newUserPass").value;
+  const role = document.getElementById("newUserRole").value;
+  if (!username || !password) { toast("用户名和密码不能为空", false); return; }
+  const r = await api("/api/admin/users", "POST", { username, password, role });
+  if (r.status === 200) { toast("用户已创建", true); closeUserModal(); loadUsers(); }
+  else { toast(r.data.error || "创建失败", false); }
+}
+async function setUserDisabled(id, disabled) {
+  const r = await api(`/api/admin/users/${id}/disable`, "POST", { disabled });
+  if (r.status === 200) { toast(disabled ? "已禁用" : "已启用", true); loadUsers(); }
+  else { toast(r.data.error || "操作失败", false); }
+}
+function openPasswordModal(id) { editingUserId = id; document.getElementById("resetPass").value = ""; document.getElementById("passwordModal").classList.add("active"); }
+function closePasswordModal() { document.getElementById("passwordModal").classList.remove("active"); }
+async function savePassword() {
+  const pass = document.getElementById("resetPass").value;
+  if (!pass) { toast("密码不能为空", false); return; }
+  const r = await api(`/api/admin/users/${editingUserId}/password`, "POST", { password: pass });
+  if (r.status === 200) { toast("密码已重置", true); closePasswordModal(); }
+  else { toast(r.data.error || "重置失败", false); }
+}
+async function changeUserRole(id, currentRole) {
+  const role = prompt("请输入新角色标识：", currentRole || "user");
+  if (!role) return;
+  const r = await api(`/api/admin/users/${id}/role`, "POST", { role });
+  if (r.status === 200) { toast("角色已更新", true); loadUsers(); }
+  else { toast(r.data.error || "更新失败", false); }
+}
+async function exportUsers() {
+  const r = await fetch("/api/admin/users/export", { headers: { "Authorization": "Bearer " + token() } });
+  if (!r.ok) { toast("导出失败", false); return; }
+  const blob = await r.blob();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "users.csv"; a.click();
+}
+async function importUsers(file) {
+  const fd = new FormData(); fd.append("file", file);
+  const r = await fetch("/api/admin/users/import", { method: "POST", headers: { "Authorization": "Bearer " + token() }, body: fd });
+  const d = await r.json().catch(() => ({}));
+  if (r.ok) { toast("导入 " + (d.imported || 0) + " 条用户", true); loadUsers(); }
+  else { toast(d.error || "导入失败", false); }
+}
+
+// ---- 角色管理 ----
+
+async function loadRoles() {
+  const r = await api("/api/admin/roles", "GET");
+  if (r.status !== 200) { toast(r.data.error || "加载角色失败", false); return; }
+  rolesCache = r.data.roles || [];
+  renderRoles(rolesCache);
+  fillRoleSelect("userRoleFilter", true);
+  fillRoleSelect("newUserRole");
+}
+function renderRoles(roles) {
+  const tbody = document.querySelector("#roleTable tbody");
+  tbody.innerHTML = roles.map(r => `<tr>
+    <td>${escapeHtml(r.name)}</td>
+    <td>${escapeHtml(r.display_name || r.name)}</td>
+    <td class="wrap">${escapeHtml(r.description || "")}</td>
+    <td>${r.is_builtin ? '<span class="tag">内置</span>' : '-'}</td>
+    <td>
+      <button class="btn ghost" style="padding:4px 10px;font-size:12px" onclick="editRole('${escapeAttr(r.name)}', '${escapeAttr(r.display_name || '')}', '${escapeAttr(r.description || '')}')">编辑</button>
+      ${r.is_builtin ? '' : `<button class="btn danger" style="padding:4px 10px;font-size:12px" onclick="deleteRole('${escapeAttr(r.name)}')">删除</button>`}
+    </td>
+  </tr>`).join("");
+}
+function fillRoleSelect(id, withAll) {
+  const sel = document.getElementById(id); if (!sel) return;
+  const old = sel.value;
+  let html = withAll ? '<option value="">全部角色</option>' : '';
+  html += rolesCache.map(r => `<option value="${escapeHtml(r.name)}">${escapeHtml(r.display_name || r.name)}</option>`).join("");
+  sel.innerHTML = html;
+  sel.value = old || "";
+}
+function openRoleModal() { editingRoleName = ""; document.getElementById("newRoleName").value = ""; document.getElementById("newRoleDisplay").value = ""; document.getElementById("newRoleDesc").value = ""; document.getElementById("newRoleName").disabled = false; document.getElementById("roleModal").classList.add("active"); }
+let editingRoleName = "";
+function editRole(name, display, desc) { editingRoleName = name; document.getElementById("newRoleName").value = name; document.getElementById("newRoleName").disabled = true; document.getElementById("newRoleDisplay").value = display; document.getElementById("newRoleDesc").value = desc; document.getElementById("roleModal").classList.add("active"); }
+function closeRoleModal() { document.getElementById("roleModal").classList.remove("active"); }
+async function saveRole() {
+  const name = document.getElementById("newRoleName").value.trim();
+  const display = document.getElementById("newRoleDisplay").value.trim();
+  const desc = document.getElementById("newRoleDesc").value.trim();
+  if (!name) { toast("角色标识不能为空", false); return; }
+  const r = await api("/api/admin/roles", "POST", { name, display_name: display, description: desc });
+  if (r.status === 200) { toast("角色已保存", true); closeRoleModal(); loadRoles(); }
+  else { toast(r.data.error || "保存失败", false); }
+}
+async function deleteRole(name) {
+  if (!confirm(`确认删除角色 ${name}？使用该角色的用户将被重置为 user。`)) return;
+  const r = await api(`/api/admin/roles?name=${encodeURIComponent(name)}`, "DELETE");
+  if (r.status === 200) { toast("角色已删除", true); loadRoles(); loadUsers(); }
+  else { toast(r.data.error || "删除失败", false); }
+}
+
+// ---- 沟通日志 ----
+
+async function loadChatLogs() {
+  const username = document.getElementById("logUsername").value;
+  const role = document.getElementById("logRole").value;
+  const keyword = document.getElementById("logKeyword").value;
+  const dateFrom = document.getElementById("logDateFrom").value;
+  const dateTo = document.getElementById("logDateTo").value;
+  const qs = new URLSearchParams({ username, role, keyword, date_from: dateFrom, date_to: dateTo, page: String(logPage), size: String(logSize) });
+  const r = await api("/api/admin/chat-logs?" + qs.toString(), "GET");
+  if (r.status !== 200) { toast(r.data.error || "加载日志失败", false); return; }
+  logTotal = r.data.total || 0;
+  renderChatLogs(r.data.logs || []);
+}
+function renderChatLogs(logs) {
+  const tbody = document.querySelector("#logTable tbody");
+  tbody.innerHTML = logs.map(l => `<tr>
+    <td>${l.id}</td>
+    <td>${escapeHtml(l.username || "-")}</td>
+    <td><span class="tag">${escapeHtml(l.role)}</span></td>
+    <td class="wrap">${escapeHtml(l.content || "")}</td>
+    <td>${formatTime(l.created_at)}</td>
+  </tr>`).join("");
+  renderLogPagination();
+}
+function renderLogPagination() {
+  const totalPages = Math.max(1, Math.ceil(logTotal / logSize));
+  const el = document.getElementById("logPagination");
+  let html = '<span class="info">共 ' + logTotal + ' 条，第 ' + logPage + '/' + totalPages + ' 页</span>';
+  html += '<button class="btn" ' + (logPage <= 1 ? 'disabled' : '') + ' onclick="goLogPage(' + (logPage - 1) + ')">上一页</button>';
+  html += '<button class="btn" ' + (logPage >= totalPages ? 'disabled' : '') + ' onclick="goLogPage(' + (logPage + 1) + ')">下一页</button>';
+  el.innerHTML = html;
+}
+function goLogPage(p) { logPage = p; loadChatLogs(); }
+function resetLogFilter() {
+  document.getElementById("logUsername").value = "";
+  document.getElementById("logRole").value = "";
+  document.getElementById("logKeyword").value = "";
+  document.getElementById("logDateFrom").value = "";
+  document.getElementById("logDateTo").value = "";
+  logPage = 1; loadChatLogs();
+}
+
+// 绑定导入文件事件
+document.getElementById("userImport").addEventListener("change", e => { if (e.target.files[0]) importUsers(e.target.files[0]); e.target.value = ""; });
+
 // 启动：有 token 直接进入，否则显示登录
 if (token()) boot();
 else document.getElementById("login").classList.remove("hidden");
 </script>
+
+<!-- 用户/角色模态框 -->
+<div class="modal" id="userModal">
+  <div class="modal-box">
+    <div class="modal-title">新增用户</div>
+    <div class="field"><label>用户名</label><input id="newUserName" /></div>
+    <div class="field" style="margin-top:10px"><label>密码</label><input id="newUserPass" type="password" /></div>
+    <div class="field" style="margin-top:10px"><label>角色</label><select id="newUserRole"></select></div>
+    <div class="modal-actions">
+      <button class="btn ghost" onclick="closeUserModal()">取消</button>
+      <button class="btn" onclick="saveUser()">保存</button>
+    </div>
+  </div>
+</div>
+<div class="modal" id="passwordModal">
+  <div class="modal-box">
+    <div class="modal-title">重置密码</div>
+    <div class="field"><label>新密码</label><input id="resetPass" type="password" /></div>
+    <div class="modal-actions">
+      <button class="btn ghost" onclick="closePasswordModal()">取消</button>
+      <button class="btn" onclick="savePassword()">保存</button>
+    </div>
+  </div>
+</div>
+<div class="modal" id="roleModal">
+  <div class="modal-box">
+    <div class="modal-title">新增/编辑角色</div>
+    <div class="field"><label>标识（如 operator）</label><input id="newRoleName" /></div>
+    <div class="field" style="margin-top:10px"><label>显示名称</label><input id="newRoleDisplay" /></div>
+    <div class="field" style="margin-top:10px"><label>描述</label><textarea id="newRoleDesc" rows="2"></textarea></div>
+    <div class="modal-actions">
+      <button class="btn ghost" onclick="closeRoleModal()">取消</button>
+      <button class="btn" onclick="saveRole()">保存</button>
+    </div>
+  </div>
+</div>
 </body>
 </html>

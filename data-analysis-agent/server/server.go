@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"company.com/data-analysis-agent/agent"
@@ -18,12 +18,10 @@ import (
 
 // Server 把数据分析 Agent 暴露为 HTTP 接口，供前端调用。
 type Server struct {
-	ag          *agent.Agent
-	users       *userdb.Store // 前端用户体系与多轮会话持久化
-	staticDir   string
+	ag           *agent.Agent
+	users        *userdb.Store // 前端用户体系与多轮会话持久化
+	staticDir    string
 	adminHandler http.Handler // 后台管理（配置 CRUD + 页面）
-	// mu 串行化 Ask 调用：本地大模型 + 单个 MCP 会话，串行更稳妥。
-	mu sync.Mutex
 }
 
 // New 构造 HTTP Server。staticDir 为前端构建产物目录（可为空，仅提供 API）；
@@ -38,17 +36,18 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", s.handleHealth)
 	mux.HandleFunc("/api/ask", s.handleAsk)
-	mux.HandleFunc("/api/models", s.handleModels)
+	mux.HandleFunc("/api/ui-config", s.handleUIConfig)
 
-	// 用户体系：注册 / 登录 / 登出 / 当前用户。
+	// 用户体系：注册 / 登录 / 登出 / 当前用户 / 用户自定义提示词。
 	mux.HandleFunc("/api/register", s.handleRegister)
 	mux.HandleFunc("/api/login", s.handleLogin)
 	mux.HandleFunc("/api/logout", s.handleLogout)
 	mux.HandleFunc("/api/me", s.handleMe)
+	mux.HandleFunc("/api/me/prompt", s.handleUserPrompt)
 
 	// 多轮会话：列表 / 创建 / 删除 / 消息。
-	mux.HandleFunc("/api/conversations", s.handleConversations)          // GET 列表, POST 新建
-	mux.HandleFunc("/api/conversations/", s.handleConversationSub)       // /{id} DELETE, /{id}/messages GET
+	mux.HandleFunc("/api/conversations", s.handleConversations)    // GET 列表, POST 新建
+	mux.HandleFunc("/api/conversations/", s.handleConversationSub) // /{id} DELETE, /{id}/messages GET
 
 	// 聊天前端页面（自包含，无需前端构建；精确路径优先于下方静态兜底）。
 	mux.HandleFunc("/ui", s.handleUI)
@@ -99,10 +98,11 @@ type askRequest struct {
 	// ConversationID 多轮会话 ID；为空则自动新建一个会话。
 	ConversationID string `json:"conversation_id"`
 	// 以下为可选的基础设置覆盖项（来自 Web UI）。
-	Model       string `json:"model"`
+	Model       string  `json:"model"`
 	Temperature float64 `json:"temperature"`
 	MaxTokens   int     `json:"max_tokens"`
-	EnableChart *bool  `json:"enable_chart"` // 是否允许生成图表；nil=沿用（开启）
+	EnableChart *bool   `json:"enable_chart"` // 是否允许生成图表；nil=沿用（开启）
+	UserPrompt  string  `json:"user_prompt"`  // 用户自定义提示词；为空表示使用系统后台默认提示词
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -116,6 +116,24 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.ag.LLMInfo())
+}
+
+// handleUIConfig 返回后台统一配置的前端展示开关（公开接口，无需登录）。
+func (s *Server) handleUIConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"error": "仅支持 GET"})
+		return
+	}
+	ui := s.ag.UIConfig()
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"show_duration":  ui.ShowDuration,
+		"show_steps":     ui.ShowSteps,
+		"show_images":    ui.ShowImages,
+		"theme":          ui.Theme,
+		"app_title":      ui.AppTitle,
+		"app_subtitle":   ui.AppSubtitle,
+		"workflow_steps": ui.WorkflowSteps,
+	})
 }
 
 func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
@@ -154,7 +172,16 @@ func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
 	history := s.loadHistory(user.ID, conv.ID, historyLimit)
 
 	// 组装可选的基础设置覆盖项（空值表示沿用运行配置）。
-	opts := buildAskOpts(req.Model, req.Temperature, req.MaxTokens, req.EnableChart)
+	// 若前端未携带用户提示词，则读取数据库中的用户默认提示词。
+	userPrompt := req.UserPrompt
+	if userPrompt == "" {
+		if p, err := s.users.UserPrompt(user.ID); err == nil {
+			userPrompt = p
+		}
+	}
+	opts := buildAskOpts(req.Model, req.Temperature, req.MaxTokens, req.EnableChart, userPrompt)
+	opts.UserID = user.ID
+	opts.ConversationID = conv.ID
 
 	// 流式请求（前端带 Accept: text/event-stream）：边处理边推送 SSE 事件，
 	// 避免长任务下前端长时间无响应，且回答不再因等待整轮完成而被"截断"显示。
@@ -163,9 +190,7 @@ func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.Lock()
 	res, aerr := s.ag.AskRichWithHistory(history, q, opts)
-	s.mu.Unlock()
 	if aerr != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": aerr.Error()})
 		return
@@ -182,14 +207,15 @@ func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
 }
 
 // buildAskOpts 组装单次提问的可选覆盖项；全空时返回 nil（沿用运行配置）。
-func buildAskOpts(model string, temperature float64, maxTokens int, enableChart *bool) *agent.AskOptions {
-	if model == "" && temperature <= 0 && maxTokens <= 0 && enableChart == nil {
+func buildAskOpts(model string, temperature float64, maxTokens int, enableChart *bool, userPrompt string) *agent.AskOptions {
+	if model == "" && temperature <= 0 && maxTokens <= 0 && enableChart == nil && userPrompt == "" {
 		return nil
 	}
 	opts := &agent.AskOptions{
 		Model:       model,
 		Temperature: temperature,
 		MaxTokens:   maxTokens,
+		UserPrompt:  userPrompt,
 	}
 	if enableChart != nil {
 		v := *enableChart
@@ -235,6 +261,7 @@ func (s *Server) handleAskStream(w http.ResponseWriter, r *http.Request, user *u
 		streamOpts.Model = opts.Model
 		streamOpts.Temperature = opts.Temperature
 		streamOpts.MaxTokens = opts.MaxTokens
+		streamOpts.UserPrompt = opts.UserPrompt
 		if opts.EnableChart != nil {
 			v := *opts.EnableChart
 			streamOpts.EnableChart = &v
@@ -250,12 +277,29 @@ func (s *Server) handleAskStream(w http.ResponseWriter, r *http.Request, user *u
 			send(map[string]interface{}{"kind": "step_start", "step": ev.Step})
 		case agent.EventStepProgress:
 			send(map[string]interface{}{"kind": "step_progress", "step": ev.Step})
+		case agent.EventStepResultDelta:
+			send(map[string]interface{}{"kind": "step_result_delta", "step": ev.Step})
 		case agent.EventStep:
 			send(map[string]interface{}{"kind": "step", "step": ev.Step})
 		case agent.EventAnswerDelta:
 			send(map[string]interface{}{"kind": "answer_delta", "text": ev.Text})
 		case agent.EventAnswer:
 			send(map[string]interface{}{"kind": "answer", "text": ev.Text})
+		case agent.EventResult:
+			if ev.Result != nil {
+				finalResult = ev.Result
+				send(map[string]interface{}{
+					"kind":           "result",
+					"answer":         ev.Result.Answer,
+					"chart":          ev.Result.Chart,
+					"rows":           ev.Result.Rows,
+					"sql":            ev.Result.SQL,
+					"steps":          ev.Result.Steps,
+					"total_duration": ev.Result.TotalDuration,
+					"llm_duration":   ev.Result.LLMDuration,
+					"tool_duration":  ev.Result.ToolDuration,
+				})
+			}
 		case agent.EventDone:
 			send(map[string]interface{}{"kind": "done"})
 		case agent.EventError:
@@ -264,10 +308,8 @@ func (s *Server) handleAskStream(w http.ResponseWriter, r *http.Request, user *u
 		}
 	}
 
-	// 复用带历史的富结果入口（持锁在 agent 内部）。
-	s.mu.Lock()
+	// 复用带历史的富结果入口（并发安全由 agent 内部 RWMutex 保证）。
 	res, aerr := s.ag.AskRichWithHistory(history, q, streamOpts)
-	s.mu.Unlock()
 	if aerr != nil && gotErr == "" {
 		gotErr = aerr.Error()
 		send(map[string]interface{}{"kind": "error", "error": aerr.Error()})
@@ -307,13 +349,16 @@ func (s *Server) loadHistory(userID, convID string, limit int) []agent.HistoryIt
 	return out
 }
 
-// marshalExtra 把富结果（图表/表格/SQL/步骤）序列化为 JSON 字符串存库，供前端回放。
+// marshalExtra 把富结果（图表/表格/SQL/步骤/耗时）序列化为 JSON 字符串存库，供前端回放。
 func marshalExtra(res *agent.AskResult) string {
 	b, err := json.Marshal(map[string]interface{}{
-		"chart": res.Chart,
-		"rows":  res.Rows,
-		"sql":   res.SQL,
-		"steps": res.Steps,
+		"chart":          res.Chart,
+		"rows":           res.Rows,
+		"sql":            res.SQL,
+		"steps":          res.Steps,
+		"total_duration": res.TotalDuration,
+		"llm_duration":   res.LLMDuration,
+		"tool_duration":  res.ToolDuration,
 	})
 	if err != nil {
 		return ""
@@ -359,12 +404,17 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"error": "仅支持 POST"})
 		return
 	}
-	var req credRequest
+	var req struct {
+		Username string `json:"username"`
+		Phone    string `json:"phone"`
+		Password string `json:"password"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "请求体解析失败"})
 		return
 	}
-	u, err := s.users.Register(req.Username, req.Password)
+	phoneRequired := s.ag.UIConfig().PhoneRequired
+	u, err := s.users.Register(req.Username, req.Phone, req.Password, phoneRequired)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
 		return
@@ -377,7 +427,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"token": token,
-		"user":  map[string]interface{}{"id": u.ID, "username": u.Username},
+		"user":  map[string]interface{}{"id": u.ID, "username": u.Username, "phone": u.Phone},
 	})
 }
 
@@ -403,7 +453,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	s.users.Logout(bearerToken(r))
+	if err := s.users.Logout(bearerToken(r)); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
 }
 
@@ -413,7 +466,36 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{"error": "未登录"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"id": u.ID, "username": u.Username})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"id": u.ID, "username": u.Username, "phone": u.Phone, "role": u.Role})
+}
+
+// handleUserPrompt 处理用户自定义提示词：GET 读取，POST 更新。
+func (s *Server) handleUserPrompt(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{"error": "未登录"})
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		p, _ := s.users.UserPrompt(u.ID)
+		writeJSON(w, http.StatusOK, map[string]interface{}{"prompt": p})
+	case http.MethodPost:
+		var body struct {
+			Prompt string `json:"prompt"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "请求体解析失败"})
+			return
+		}
+		if err := s.users.SetUserPrompt(u.ID, body.Prompt); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"error": "仅支持 GET/POST"})
+	}
 }
 
 // ---- 多轮会话 ----
@@ -426,12 +508,30 @@ func (s *Server) handleConversations(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		list, err := s.users.ListConversations(u.ID)
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+		defaultLimit := s.ag.UIConfig().ChatPageSize
+		if defaultLimit <= 0 || defaultLimit > 200 {
+			defaultLimit = 50
+		}
+		if limit <= 0 || limit > 200 {
+			limit = defaultLimit
+		}
+		if offset < 0 {
+			offset = 0
+		}
+		list, total, err := s.users.ListConversationsPaginated(u.ID, limit, offset)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]interface{}{"conversations": list})
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"conversations": list,
+			"total":         total,
+			"limit":         limit,
+			"offset":        offset,
+			"has_more":      int(offset)+len(list) < int(total),
+		})
 	case http.MethodPost:
 		var body struct {
 			Title string `json:"title"`
@@ -463,18 +563,58 @@ func (s *Server) handleConversationSub(w http.ResponseWriter, r *http.Request) {
 	}
 	convID := parts[0]
 
-	// /{id}/messages -> 获取消息历史
+	// /{id}/messages -> 获取消息历史（支持分页）
 	if len(parts) >= 2 && parts[1] == "messages" {
 		if r.Method != http.MethodGet {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"error": "方法不支持"})
 			return
 		}
-		msgs, err := s.users.ListMessages(u.ID, convID)
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+		latest := r.URL.Query().Get("latest") == "true"
+		defaultLimit := s.ag.UIConfig().ChatPageSize
+		if defaultLimit <= 0 || defaultLimit > 200 {
+			defaultLimit = 50
+		}
+		if limit <= 0 || limit > 200 {
+			limit = defaultLimit
+		}
+		if offset < 0 {
+			offset = 0
+		}
+
+		msgs, total, err := s.users.ListMessagesPaginated(u.ID, convID, limit, offset)
 		if err != nil {
 			writeJSON(w, http.StatusNotFound, map[string]interface{}{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]interface{}{"messages": msgs})
+
+		// latest=true 返回最近的 limit 条（用于首次进入会话时直接看最新内容）
+		if latest {
+			actualOffset := 0
+			if int(total) > limit {
+				actualOffset = int(total) - limit
+				// 对齐到页边界，避免重复
+				actualOffset = (actualOffset / limit) * limit
+			}
+			if actualOffset != offset {
+				msgs, _, err = s.users.ListMessagesPaginated(u.ID, convID, limit, actualOffset)
+				if err != nil {
+					writeJSON(w, http.StatusNotFound, map[string]interface{}{"error": err.Error()})
+					return
+				}
+			}
+			offset = actualOffset
+		}
+
+		hasMore := offset > 0
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"messages": msgs,
+			"total":    total,
+			"limit":    limit,
+			"offset":   offset,
+			"has_more": hasMore,
+		})
 		return
 	}
 

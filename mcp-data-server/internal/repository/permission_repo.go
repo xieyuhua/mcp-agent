@@ -15,6 +15,9 @@ func NewPermissionRepo(db *gorm.DB) *PermissionRepo {
 	return &PermissionRepo{db: db}
 }
 
+// DB 返回底层数据库连接（用于测试/审计服务构造）。
+func (r *PermissionRepo) DB() *gorm.DB { return r.db }
+
 // --- PermissionPolicy ---
 
 // GetPolicy 优先取租户级策略，否则取平台全局默认（TenantID=""）。
@@ -63,6 +66,56 @@ func (r *PermissionRepo) UpsertPolicy(p *model.PermissionPolicy) error {
 // DeletePolicy 删除租户级策略（回退到平台默认）。
 func (r *PermissionRepo) DeletePolicy(tenantID, role string) error {
 	return r.db.Where("tenant_id = ? AND role = ?", tenantID, role).Delete(&model.PermissionPolicy{}).Error
+}
+
+// --- FieldPermission ---
+
+// ListFieldPermissions 列出某租户（含平台默认）的全部字段权限。
+func (r *PermissionRepo) ListFieldPermissions(tenantID string) ([]model.FieldPermission, error) {
+	var list []model.FieldPermission
+	err := r.db.Where("tenant_id = ? OR tenant_id = ?", tenantID, "").
+		Order("tenant_id ASC, role, table_name, column").Find(&list).Error
+	return list, err
+}
+
+// GetFieldPermissionsAsMap 合并平台默认与租户级字段权限为 table->column->hidden（租户级覆盖平台级）。
+func (r *PermissionRepo) GetFieldPermissionsAsMap(tenantID, role string) (map[string]map[string]bool, error) {
+	var list []model.FieldPermission
+	err := r.db.Where("(tenant_id = ? OR tenant_id = ?) AND role = ?", tenantID, "", role).
+		Order("tenant_id ASC").Find(&list).Error
+	if err != nil {
+		return nil, err
+	}
+	return model.ParseHiddenFieldsMap(list), nil
+}
+
+// UpsertFieldPermission 新增或更新字段权限（按 tenant+role+table+column 唯一）。
+func (r *PermissionRepo) UpsertFieldPermission(fp *model.FieldPermission) error {
+	var existing model.FieldPermission
+	err := r.db.Where("tenant_id = ? AND role = ? AND table_name = ? AND column = ?",
+		fp.TenantID, fp.Role, fp.TableName, fp.Column).First(&existing).Error
+	if err == gorm.ErrRecordNotFound {
+		return r.db.Create(fp).Error
+	}
+	if err != nil {
+		return err
+	}
+	fp.ID = existing.ID
+	return r.db.Model(&existing).Select("hidden", "updated_by").Updates(map[string]interface{}{
+		"hidden":     fp.Hidden,
+		"updated_by": fp.UpdatedBy,
+	}).Error
+}
+
+// DeleteFieldPermission 删除租户级字段权限。
+func (r *PermissionRepo) DeleteFieldPermission(tenantID, role, table, column string) error {
+	return r.db.Where("tenant_id = ? AND role = ? AND table_name = ? AND column = ?",
+		tenantID, role, table, column).Delete(&model.FieldPermission{}).Error
+}
+
+// DeleteFieldPermissionByRole 删除某租户+角色下的全部字段权限（用于策略级联清理）。
+func (r *PermissionRepo) DeleteFieldPermissionByRole(tenantID, role string) error {
+	return r.db.Where("tenant_id = ? AND role = ?", tenantID, role).Delete(&model.FieldPermission{}).Error
 }
 
 // --- MaskRule ---

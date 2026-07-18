@@ -99,7 +99,8 @@ func main() {
 	defer ag.Close()
 
 	// 后台管理服务：配置的查看/修改/重置（持久化到数据库并热应用）。
-	adminSvc := admin.New(store, ag)
+	// 仅在 HTTP 服务模式下初始化，因为需要用户数据库支持用户/角色/日志管理。
+	var adminSvc *admin.Server
 
 	// HTTP 服务模式：供前端调用
 	if *serve {
@@ -108,6 +109,8 @@ func main() {
 			fmt.Fprintf(os.Stderr, "打开用户数据库失败: %v\n", err)
 			os.Exit(1)
 		}
+		ag.SetCallLogStore(users)
+		adminSvc = admin.New(store, users, ag)
 		srv := server.New(ag, users, *staticDir, adminSvc.Handler())
 		if err := srv.Run(*addr); err != nil {
 			fmt.Fprintf(os.Stderr, "HTTP 服务异常: %v\n", err)
@@ -158,6 +161,8 @@ func main() {
 func cliAsk(ag *agent.Agent, q string, base *agent.AskOptions) (string, error) {
 	fmt.Printf("\n助手> ")
 	gotDelta := false
+	resultStarted := false // 工具结果是否已开始流式输出
+	streamedResult := ""   // 已流式输出的结果片段（用于 CLI 补全剩余内容）
 	// thinking 标记当前是否处于“思考中”提示态（spinner 正在运行）。
 	thinking := false
 	var spinnerStop chan struct{}
@@ -219,12 +224,29 @@ func cliAsk(ag *agent.Agent, q string, base *agent.AskOptions) (string, error) {
 			if ev.Step != nil && ev.Step.Progress != "" {
 				fmt.Printf("\r  ⏳ %s\033[K", ev.Step.Progress)
 			}
+		case agent.EventStepResultDelta:
+			// 工具结果流式片段：在同一行逐步打印，像打字机一样。
+			clearThinking()
+			if !resultStarted {
+				fmt.Printf("\r\033[K     结果: ")
+				resultStarted = true
+			}
+			fmt.Print(ev.Step.Result)
+			streamedResult += ev.Step.Result
 		case agent.EventStep:
 			// 结果不截断：完整打印工具返回，便于排查与查看全量数据。
 			fmt.Printf("\r\033[K") // 先清掉可能残留的进度行
 			if ev.Step.Result != "" {
-				fmt.Printf("     结果: %s\n", ev.Step.Result)
+				if !resultStarted {
+					fmt.Printf("     结果: %s", ev.Step.Result)
+				} else if len(ev.Step.Result) > len(streamedResult) {
+					// 后端对大结果只流式展示前 2000 字节，这里补全剩余部分。
+					fmt.Print(ev.Step.Result[len(streamedResult):])
+				}
+				fmt.Println()
 			}
+			resultStarted = false
+			streamedResult = ""
 			fmt.Print("  助手> ")
 		case agent.EventAnswerDelta:
 			clearThinking()
@@ -236,6 +258,8 @@ func cliAsk(ag *agent.Agent, q string, base *agent.AskOptions) (string, error) {
 				clearThinking()
 				fmt.Println(ev.Text)
 			}
+		case agent.EventResult:
+			// 结构化结果（chart/rows/sql）主要供 Web 端渲染，CLI 无需展示。
 		case agent.EventDone:
 			clearThinking()
 			fmt.Println()
@@ -245,15 +269,6 @@ func cliAsk(ag *agent.Agent, q string, base *agent.AskOptions) (string, error) {
 		}
 	}
 	return ag.AskWithStream(q, base, onEvent)
-}
-
-// truncateCLI 按 rune 截断字符串，避免中文被切半。
-func truncateCLI(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	return string(r[:n]) + "..."
 }
 
 // remoteTransportName 返回远程 MCP 传输方式的可读名称（默认 streamable-http）。

@@ -137,7 +137,7 @@ onMounted(async () => {
       <textarea
         v-model="input"
         rows="1"
-        placeholder="输入你的数据分析问题，回车发送（Shift+Enter 换行）"
+        placeholder="输入你的数据分析问题"
         @keydown="onKeydown"
       ></textarea>
       <button class="send" :disabled="loading || !input.trim()" @click="send()">
