@@ -10,15 +10,15 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/mark3labs/mcp-go/server"
+
 	"company.com/mcp-data-server/config"
 	"company.com/mcp-data-server/internal/admin"
 	"company.com/mcp-data-server/internal/auth"
 	"company.com/mcp-data-server/internal/handler"
 	"company.com/mcp-data-server/internal/mask"
-	"company.com/mcp-data-server/internal/mcp"
 	"company.com/mcp-data-server/internal/repository"
 	"company.com/mcp-data-server/internal/service"
-	"company.com/mcp-data-server/internal/transport"
 	"company.com/mcp-data-server/internal/web"
 )
 
@@ -64,7 +64,15 @@ func main() {
 	permSvc := service.NewPermissionService(permRepo, authz, masker, auditSvc)
 
 	toolHandler := handler.NewToolHandler(authSvc, querySvc, permSvc, cfg.WorkDir)
-	server := mcp.NewServer("mcp-data-server", "1.0.0", handler.Tools, toolHandler.Handle)
+
+	// 用 mcp-go 构建 MCP 服务，并注册全部业务工具。
+	mcpServer := server.NewMCPServer(
+		"mcp-data-server",
+		"1.0.0",
+		server.WithToolCapabilities(true),
+		server.WithRecovery(),
+	)
+	handler.RegisterTools(mcpServer, toolHandler)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -72,43 +80,40 @@ func main() {
 	// 根据 transport 配置启动对应传输层
 	switch strings.ToLower(cfg.Transport) {
 	case "http":
-		startHTTP(ctx, cfg, server, authSvc, permSvc)
+		startHTTP(ctx, cfg, mcpServer, authSvc, permSvc)
 	case "both":
-		stdio := transport.NewStdio(server)
 		go func() {
 			log.Println("mcp-data-server stdio transport started")
-			if err := stdio.Run(ctx); err != nil && ctx.Err() == nil {
+			if err := server.ServeStdio(mcpServer); err != nil && ctx.Err() == nil {
 				log.Printf("stdio stopped: %v", err)
 			}
 		}()
-		startHTTP(ctx, cfg, server, authSvc, permSvc)
+		startHTTP(ctx, cfg, mcpServer, authSvc, permSvc)
 	default: // stdio（默认）
-		stdio := transport.NewStdio(server)
 		log.Println("mcp-data-server started, listening on stdio")
-		if err := stdio.Run(ctx); err != nil && ctx.Err() == nil {
+		if err := server.ServeStdio(mcpServer); err != nil && ctx.Err() == nil {
 			log.Fatalf("server stopped: %v", err)
 		}
 	}
 }
 
-// startHTTP 启动 HTTP 传输（MCP over HTTP + 权限后台 + 内嵌 Web）。
-func startHTTP(ctx context.Context, cfg *config.Config, server *mcp.Server, authSvc *service.AuthService, permSvc *service.PermissionService) {
+// startHTTP 启动 HTTP 传输（MCP over streamable-http + 权限后台 + 内嵌 Web）。
+func startHTTP(ctx context.Context, cfg *config.Config, mcpServer *server.MCPServer, authSvc *service.AuthService, permSvc *service.PermissionService) {
 	addr := cfg.HTTPAddr
 	if addr == "" {
 		addr = ":8081"
 	}
-	httpSrv := transport.NewHTTPServer(server)
+	// mcp-go 的 streamable-http 处理器：实现 http.Handler，自动处理 GET(SSE)/POST，并管理会话。
+	httpSrv := server.NewStreamableHTTPServer(mcpServer, server.WithEndpointPath("/mcp"))
 	adminSrv := admin.New(authSvc, permSvc)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/mcp", httpSrv.HandleStreamable)    // streamable-http
-	mux.HandleFunc("/sse", httpSrv.HandleSSE)           // 旧版 sse 接收流
-	mux.HandleFunc("/messages", httpSrv.HandleMessages) // 旧版 sse 消息端点
-	mux.Handle("/api/admin/", adminSrv.Handler())       // 权限后台 REST API
-	mux.Handle("/", web.StaticHandler(cfg.WebDir))      // 内嵌/外部 Web 页面
+	mux.Handle("/mcp", httpSrv)                  // streamable-http（GET 建流 + POST 收发）
+	mux.Handle("/api/admin/", adminSrv.Handler()) // 权限后台 REST API
+	mux.Handle("/", web.StaticHandler(cfg.WebDir)) // 内嵌/外部 Web 页面
 
 	handler := withCORS(mux)
-	log.Printf("mcp-data-server HTTP started: http://%s  (mcp=%s, sse=%s, admin=/api/admin, web=/)", normalizeAddr(addr), "/mcp", "/sse")
+	log.Printf("mcp-data-server HTTP started: http://%s  (mcp=/mcp, admin=/api/admin, web=/)", normalizeAddr(addr))
 	if err := http.ListenAndServe(addr, handler); err != nil && ctx.Err() == nil {
 		log.Fatalf("http server stopped: %v", err)
 	}
@@ -118,7 +123,7 @@ func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return

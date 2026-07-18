@@ -26,6 +26,8 @@ type Agent struct {
 	extraMCPs []*extraMCP
 	// toolRoute 工具名 -> 提供该工具的额外 MCP 客户端。主 MCP 与内置 agent 工具不在此表内。
 	toolRoute map[string]*mcpclient.Client
+	// toolRegistry 工具名 -> 执行函数（picoclaw 风格的统一分发表）。
+	toolRegistry map[string]toolRunner
 
 	// mu 保护 cfg/llm/mcp/tools/schema 的热更新，避免与 Ask 并发竞争。
 	mu sync.Mutex
@@ -244,11 +246,11 @@ func (a *Agent) connectExtraMCPs(cfg *config.Config) {
 }
 
 // buildTools 暴露给大模型的工具。
-// 内置 agent 工具（render_chart / query_weather）始终可用；
-// 数据类工具则依对接模式而定：内置 mcp-data-server 用写死的三个，远程 MCP 用其真实工具清单；
-// 此外聚合所有额外 MCP 的工具，并建立工具名 -> 客户端的路由表。
+// Agent 本身不内置任何技能工具，所有能力均来自 MCP：
+// 主 MCP（内置 mcp-data-server 或远程通用 MCP）的工具清单 + 所有额外对接的远程 MCP 工具。
+// Agent 只做编排与调度，不实现具体技能（图表/天气等也应由对应 MCP 提供）。
 func (a *Agent) buildTools() []llm.Tool {
-	tools := a.builtinAgentTools()
+	var tools []llm.Tool
 	if a.builtin {
 		tools = append(tools, a.localDataTools()...)
 	} else {
@@ -282,49 +284,9 @@ func (a *Agent) buildTools() []llm.Tool {
 			})
 		}
 	}
+	// 构建「工具名 -> 执行函数」注册表，供 executeTool 按名分发。
+	a.toolRegistry = a.buildRegistry(tools)
 	return tools
-}
-
-// builtinAgentTools Agent 内置工具（不论 MCP 模式都可用）。
-func (a *Agent) builtinAgentTools() []llm.Tool {
-	return []llm.Tool{
-		{
-			Name:        "render_chart",
-			Description: "当分析结果适合可视化时调用，生成图表供前端展示。你需要从查询结果里提取聚合后的数值填入，并【自动选择最合适的图表类型】：\n- 各分类数值的【大小对比】（如各状态订单数、各地区销量）→ 用 bar 柱状图；\n- 数值随【时间/顺序变化的趋势】（如按天/按月的金额走势）→ 用 line 折线图；\n- 各部分占【整体的比例/构成】（且分类数≤8，合计有意义）→ 用 pie 饼图。\n选型原则：比较用柱状、趋势用折线、占比用饼图。调用后请再用一句话给出文字结论。",
-			Parameters: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"type":       map[string]interface{}{"type": "string", "enum": []string{"bar", "line", "pie"}, "description": "图表类型：bar 柱状(对比) | line 折线(趋势) | pie 饼图(占比)"},
-					"title":      map[string]interface{}{"type": "string", "description": "图表标题"},
-					"categories": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "X 轴分类或饼图各扇区名称，如 [\"paid\",\"pending\",\"cancelled\"]"},
-					"series": map[string]interface{}{
-						"type":        "array",
-						"description": "数据系列。饼图只需一个系列，data 与 categories 一一对应。",
-						"items": map[string]interface{}{
-							"type": "object",
-							"properties": map[string]interface{}{
-								"name": map[string]interface{}{"type": "string", "description": "系列名，如 订单数 / 金额"},
-								"data": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "number"}, "description": "数值数组，与 categories 顺序一致"},
-							},
-							"required": []string{"name", "data"},
-						},
-					},
-				},
-				"required": []string{"type", "categories", "series"},
-			},
-		},
-		{
-			Name:        "query_weather",
-			Description: "联网查询某个城市的实时天气（气温、天气状况、湿度、风速）。当用户问到天气、气温、是否下雨、出行建议等时调用。返回中文天气描述。",
-			Parameters: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"city": map[string]interface{}{"type": "string", "description": "城市名，如 北京 / 上海 / 杭州 / 东京"},
-				},
-				"required": []string{"city"},
-			},
-		},
-	}
 }
 
 // localDataTools 本地内置 mcp-data-server 的数据库分析工具（带中文描述与映射）。
@@ -527,6 +489,7 @@ func (a *Agent) AskWith(question string, opts *AskOptions) (string, error) {
 }
 
 // HistoryMessage 一条历史对话消息（用于多轮上下文记忆）。
+// 兼容旧调用：仅含文本。新代码建议用 HistoryItem（含结构化 extra）。
 type HistoryMessage struct {
 	Role    string // user | assistant
 	Content string
@@ -539,8 +502,8 @@ func (a *Agent) AskRich(question string, opts *AskOptions) (*AskResult, error) {
 }
 
 // AskRichWithHistory 在带历史上下文的情况下处理一次提问，实现多轮对话记忆。
-// history 为按时间正序排列的既往消息（不含本次 question）。
-func (a *Agent) AskRichWithHistory(history []HistoryMessage, question string, opts *AskOptions) (*AskResult, error) {
+// history 为按时间正序排列的既往消息（不含本次 question），可携带结构化 extra（图表/表格/SQL）。
+func (a *Agent) AskRichWithHistory(history []HistoryItem, question string, opts *AskOptions) (*AskResult, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -562,20 +525,23 @@ func (a *Agent) AskRichWithHistory(history []HistoryMessage, question string, op
 		llmClient = llm.NewClient(a.cfg.LLM.Provider, a.cfg.LLM.BaseURL, model, a.cfg.LLM.APIKey, temp, maxTok)
 	}
 
+	system := a.systemPrompt()
 	messages := []llm.Message{
-		{Role: "system", Content: a.systemPrompt()},
+		{Role: "system", Content: system},
 	}
-	// 注入历史上下文（多轮记忆）。仅保留 user/assistant 文本，避免污染工具协议。
-	for _, h := range history {
-		role := h.Role
-		if role != "user" && role != "assistant" {
-			continue
-		}
-		if strings.TrimSpace(h.Content) == "" {
-			continue
-		}
-		messages = append(messages, llm.Message{Role: role, Content: h.Content})
+
+	// 记忆层：组织历史上下文（结构化回放 + 早期摘要压缩）。
+	var summary string
+	var histMsgs []llm.Message
+	if len(history) > 0 {
+		summary, histMsgs = a.buildMemoryContext(history, defaultMemoryConfig(), llmClient)
 	}
+	if summary != "" {
+		memPrompt := "以下是本次对话较早阶段的记忆摘要，请结合它理解用户的连续意图：\n" + summary
+		// 把记忆摘要作为一条 system 消息追加在系统提示之后、历史之前。
+		messages = append(messages, llm.Message{Role: "system", Content: memPrompt})
+	}
+	messages = append(messages, histMsgs...)
 	messages = append(messages, llm.Message{Role: "user", Content: question})
 	result := &AskResult{}
 
@@ -616,90 +582,21 @@ func (a *Agent) AskRichWithHistory(history []HistoryMessage, question string, op
 	return nil, fmt.Errorf("已达到最大推理步数 %d，仍未给出最终结论", a.cfg.Agent.MaxSteps)
 }
 
-// executeTool 执行一个工具调用；render_chart 由 Agent 本地捕获，其余注入 token 后转发给 MCP。
+// executeTool 执行一个工具调用：解析参数后按工具名在注册表中查找并执行（picoclaw 风格统一分发）。
 func (a *Agent) executeTool(tc llm.ToolCall, result *AskResult) string {
 	var args map[string]interface{}
 	if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
 		return fmt.Sprintf("工具参数解析失败: %v", err)
 	}
-
-	// render_chart 不走 MCP，直接解析为图表规格存入结果。
-	if tc.Name == "render_chart" {
-		return a.captureChart(tc.Arguments, result)
+	run, ok := a.toolRegistry[tc.Name]
+	if !ok {
+		return fmt.Sprintf("未知工具: %s", tc.Name)
 	}
-
-	// query_weather 联网天气查询，由 Agent 本地发起 HTTP 请求，不走 MCP。
-	if tc.Name == "query_weather" {
-		city, _ := args["city"].(string)
-		desc, err := a.queryWeather(city)
-		if err != nil {
-			return "天气查询失败: " + err.Error()
-		}
-		return desc
-	}
-
-	// 额外对接的远程 MCP 工具：按路由表转发到对应客户端（通用 MCP，不注入 token）。
-	if cli, ok := a.toolRoute[tc.Name]; ok {
-		text, isErr, err := cli.CallTool(tc.Name, args)
-		if err != nil {
-			return fmt.Sprintf("工具调用出错: %v", err)
-		}
-		if isErr {
-			return "工具执行失败: " + text
-		}
-		if rows := parseRows(text); rows != nil {
-			result.Rows = rows
-		}
-		return a.truncateResult(text)
-	}
-
-	// 内置 mcp-data-server 需要注入 token 并把模型工具名映射到后端真实名；
-	// 远程通用 MCP 直接以模型给出的工具名转发，不注入 token。
-	var mcpName string
-	if a.builtin {
-		args["token"] = a.token
-		mcpName = a.mcpToolName(tc.Name)
-	} else {
-		mcpName = tc.Name
-	}
-	if !a.mcp.HasTool(mcpName) {
-		return fmt.Sprintf("未知工具: %s", mcpName)
-	}
-
-	text, isErr, err := a.mcp.CallTool(mcpName, args)
+	text, err := run(args, result)
 	if err != nil {
-		return fmt.Sprintf("工具调用出错: %v", err)
+		return "工具执行失败: " + err.Error()
 	}
-	if isErr {
-		return "工具执行失败: " + text
-	}
-
-	// 记录 SQL 与返回的数据行，供前端表格/图表兜底展示（仅内置模式有 run_sql）。
-	if a.builtin && tc.Name == "run_sql" {
-		if sql, ok := args["sql"].(string); ok {
-			result.SQL = sql
-		}
-	}
-	if rows := parseRows(text); rows != nil {
-		result.Rows = rows
-	}
-	return a.truncateResult(text)
-}
-
-// captureChart 解析 render_chart 参数为 ChartSpec 并存入结果。
-func (a *Agent) captureChart(rawArgs string, result *AskResult) string {
-	var spec ChartSpec
-	if err := json.Unmarshal([]byte(rawArgs), &spec); err != nil {
-		return fmt.Sprintf("图表参数解析失败: %v", err)
-	}
-	if spec.Type == "" {
-		spec.Type = "bar"
-	}
-	if len(spec.Series) == 0 || len(spec.Categories) == 0 {
-		return "图表数据不完整：categories 与 series 均不能为空"
-	}
-	result.Chart = &spec
-	return "图表已生成并展示给用户，请再用简洁的中文给出这组数据的分析结论。"
+	return text
 }
 
 // parseRows 尝试把工具返回文本解析为行数据（JSON 数组）。

@@ -135,7 +135,8 @@ func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 读取会话历史作为上下文（多轮记忆），限制最近 N 条避免上下文爆炸。
-	history := s.loadHistory(user.ID, conv.ID, 20)
+	// 历史携带 assistant 的结构化结果（图表/表格/SQL），供记忆层回放。
+	history := s.loadHistory(user.ID, conv.ID, 30)
 
 	// 组装可选的基础设置覆盖项（空值表示沿用运行配置）。
 	var opts *agent.AskOptions
@@ -178,8 +179,8 @@ func (s *Server) resolveConversation(userID, convID, firstQ string) (*userdb.Con
 	return s.users.CreateConversation(userID, title)
 }
 
-// loadHistory 读取会话最近 limit 条消息，转为 agent 历史格式。
-func (s *Server) loadHistory(userID, convID string, limit int) []agent.HistoryMessage {
+// loadHistory 读取会话最近 limit 条消息，转为 agent 历史格式（含结构化 extra 供记忆层回放）。
+func (s *Server) loadHistory(userID, convID string, limit int) []agent.HistoryItem {
 	msgs, err := s.users.ListMessages(userID, convID)
 	if err != nil {
 		return nil
@@ -187,9 +188,9 @@ func (s *Server) loadHistory(userID, convID string, limit int) []agent.HistoryMe
 	if limit > 0 && len(msgs) > limit {
 		msgs = msgs[len(msgs)-limit:]
 	}
-	out := make([]agent.HistoryMessage, 0, len(msgs))
+	out := make([]agent.HistoryItem, 0, len(msgs))
 	for _, m := range msgs {
-		out = append(out, agent.HistoryMessage{Role: m.Role, Content: m.Content})
+		out = append(out, agent.HistoryItem{Role: m.Role, Content: m.Content, Extra: m.Extra})
 	}
 	return out
 }

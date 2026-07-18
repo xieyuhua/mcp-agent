@@ -21,49 +21,6 @@ func NewToolHandler(auth *service.AuthService, query *service.QueryService, perm
 	return &ToolHandler{auth: auth, query: query, permission: permission, workDir: workDir}
 }
 
-// Handle 实现 mcp.CallHandler。
-func (h *ToolHandler) Handle(ctx context.Context, name string, args map[string]interface{}) (interface{}, error) {
-	switch name {
-	case "auth_login":
-		return h.login(args)
-	case "query_table":
-		return h.queryTable(ctx, args)
-	case "run_sql":
-		return h.runSQL(ctx, args)
-	case "describe_table":
-		return h.describeTable(ctx, args)
-	case "perm_view":
-		return h.permView(ctx, args)
-	case "perm_set":
-		return h.permSet(ctx, args)
-	case "perm_delete":
-		return h.permDelete(ctx, args)
-	case "mask_view":
-		return h.maskView(ctx, args)
-	case "mask_set":
-		return h.maskSet(ctx, args)
-	case "mask_delete":
-		return h.maskDelete(ctx, args)
-	// --- 文件 / 目录读写工具 ---
-	case "read_file":
-		return h.readFile(args)
-	case "write_file":
-		return h.writeFile(args)
-	case "append_file":
-		return h.appendFile(args)
-	case "list_dir":
-		return h.listDir(args)
-	case "make_dir":
-		return h.makeDir(args)
-	case "delete_file":
-		return h.deleteFile(args)
-	case "read_dir_tree":
-		return h.readDirTree(args)
-	default:
-		return nil, fmt.Errorf("unknown tool: %s", name)
-	}
-}
-
 // ctxFromArgs 从参数中取出 token 并解析租户上下文。
 func (h *ToolHandler) ctxFromArgs(args map[string]interface{}) (context.Context, *tenant.Context, error) {
 	tok, _ := args["token"].(string)

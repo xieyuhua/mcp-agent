@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="dark">
+<html lang="zh-CN" data-theme="auto">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
@@ -14,6 +14,19 @@
     --bg: #f4f6fb; --panel: #ffffff; --panel-2: #eef1f7; --border: #dde3ec;
     --text: #1b2230; --text-dim: #6b7488; --accent: #2b6cff; --accent-2: #7c5cff;
     --user-bubble: #2b6cff; --ok: #1a9c5b; --warn: #c97e00; --err: #d23b3b;
+  }
+  /* 默认主题：跟随系统配色（auto） */
+  @media (prefers-color-scheme: light) {
+    [data-theme="auto"] {
+      --bg: #f4f6fb; --panel: #ffffff; --panel-2: #eef1f7; --border: #dde3ec;
+      --text: #1b2230; --text-dim: #6b7488; --accent: #2b6cff; --accent-2: #7c5cff;
+      --user-bubble: #2b6cff; --ok: #1a9c5b; --warn: #c97e00; --err: #d23b3b;
+    }
+  }
+  @media (prefers-color-scheme: light) {
+    [data-theme="auto"] .bubble .md pre,
+    [data-theme="auto"] .sql pre,
+    [data-theme="auto"] .step { background: #1b2230; color: #cdeccf; }
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
@@ -226,9 +239,14 @@
       <span class="desc">默认展开分析过程</span>
       <label class="switch"><input type="checkbox" id="setSteps" /><span class="slider"></span></label>
     </div>
-    <div class="switch-row">
-      <span class="desc">深色主题</span>
-      <label class="switch"><input type="checkbox" id="setDark" checked /><span class="slider"></span></label>
+    <div class="field">
+      <label>主题 Theme</label>
+      <select id="setTheme">
+        <option value="auto">跟随系统（默认）</option>
+        <option value="light">浅色</option>
+        <option value="dark">深色</option>
+      </select>
+      <div class="hint">默认主题会跟随操作系统的深色/浅色偏好自动切换。</div>
     </div>
     <div class="switch-row">
       <span class="desc">自动滚动到最新</span>
@@ -240,6 +258,23 @@
     <button class="btn-primary" id="saveSettings">完成</button>
   </div>
 </aside>
+
+<!-- 认证遮罩：未登录时显示登录/注册（置于脚本之前，确保脚本运行时元素已存在） -->
+<div class="auth-mask" id="authMask">
+  <div class="auth-card">
+    <h2 id="authTitle">登录</h2>
+    <div class="sub" id="authSub">登录后即可开始多轮数据分析对话</div>
+    <div class="field">
+      <input type="text" id="authUser" placeholder="用户名（至少2位）" autocomplete="username" />
+    </div>
+    <div class="field">
+      <input type="password" id="authPass" placeholder="密码（至少4位）" autocomplete="current-password" />
+    </div>
+    <button class="primary" id="authSubmit">登录</button>
+    <div class="err" id="authErr"></div>
+    <div class="switch-line" id="authSwitch">还没有账号？<a id="authToggle">立即注册</a></div>
+  </div>
+</div>
 
 <script>
 (function () {
@@ -433,10 +468,10 @@
       var s = JSON.parse(localStorage.getItem(SETTINGS_KEY));
       if (s) return s;
     } catch (e) {}
-    return { model: "", temperature: 0, max_tokens: 0, showSteps: false, dark: true, auto: true };
+    return { model: "", temperature: 0, max_tokens: 0, showSteps: false, theme: "auto", auto: true };
   }
   function saveSettings() { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); }
-  function applyTheme() { document.documentElement.setAttribute("data-theme", settings.dark ? "dark" : "light"); }
+  function applyTheme() { document.documentElement.setAttribute("data-theme", settings.theme || "auto"); }
 
   fetch("/api/models").then(function (r) { return r.json(); }).then(function (info) {
     var m = document.getElementById("setModel");
@@ -729,7 +764,7 @@
   var elTempVal = document.getElementById("setTempVal");
   var elMax = document.getElementById("setMax");
   var elSteps = document.getElementById("setSteps");
-  var elDark = document.getElementById("setDark");
+  var elTheme = document.getElementById("setTheme");
   var elAuto = document.getElementById("setAuto");
 
   function syncSettingsToUI() {
@@ -738,7 +773,7 @@
     elTempVal.textContent = (settings.temperature || 0).toFixed(2);
     elMax.value = settings.max_tokens || 0;
     elSteps.checked = !!settings.showSteps;
-    elDark.checked = settings.dark !== false;
+    elTheme.value = settings.theme || "auto";
     elAuto.checked = settings.auto !== false;
   }
   function openDrawer() { overlay.classList.add("show"); drawer.classList.add("show"); }
@@ -751,12 +786,12 @@
     settings.temperature = parseFloat(elTemp.value) || 0;
     settings.max_tokens = parseInt(elMax.value, 10) || 0;
     settings.showSteps = elSteps.checked;
-    settings.dark = elDark.checked;
+    settings.theme = elTheme.value || "auto";
     settings.auto = elAuto.checked;
     saveSettings(); applyTheme(); closeDrawer();
   };
   document.getElementById("resetSettings").onclick = function () {
-    settings = { model: "", temperature: 0, max_tokens: 0, showSteps: false, dark: true, auto: true };
+    settings = { model: "", temperature: 0, max_tokens: 0, showSteps: false, theme: "auto", auto: true };
     saveSettings(); syncSettingsToUI(); applyTheme();
   };
   elTemp.oninput = function () { elTempVal.textContent = parseFloat(elTemp.value).toFixed(2); };
@@ -765,25 +800,14 @@
   applyTheme();
   syncSettingsToUI();
   autoGrow();
+  // 默认主题下跟随系统深色/浅色偏好实时切换
+  if (window.matchMedia) {
+    window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", function () {
+      if ((settings.theme || "auto") === "auto") applyTheme();
+    });
+  }
 })();
 </script>
-
-<!-- 认证遮罩：未登录时显示登录/注册 -->
-<div class="auth-mask" id="authMask">
-  <div class="auth-card">
-    <h2 id="authTitle">登录</h2>
-    <div class="sub" id="authSub">登录后即可开始多轮数据分析对话</div>
-    <div class="field">
-      <input type="text" id="authUser" placeholder="用户名（至少2位）" autocomplete="username" />
-    </div>
-    <div class="field">
-      <input type="password" id="authPass" placeholder="密码（至少4位）" autocomplete="current-password" />
-    </div>
-    <button class="primary" id="authSubmit">登录</button>
-    <div class="err" id="authErr"></div>
-    <div class="switch-line" id="authSwitch">还没有账号？<a id="authToggle">立即注册</a></div>
-  </div>
-</div>
 
 </body>
 </html>
