@@ -16,6 +16,7 @@
     "mask_enabled": true,
     "seed_demo": true,
     "work_dir": "workdir",
+    "sandbox_enabled": true,
     "base_url": "http://127.0.0.1:9000/mcp",
     "transport": "streamable-http",
     "api_key": ""
@@ -23,6 +24,9 @@
   "agent": {
     "max_steps": 8,
     "use_native_tools": true,
-    "max_result_rows": 200
+    "max_result_rows": 200,
+    "memory_max_history": 30,
+    "memory_summary_threshold": 12,
+    "memory_recent_keep": 6
   }
 }

@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"company.com/data-analysis-agent/config"
+	"company.com/data-analysis-agent/internal/logger"
 	"company.com/data-analysis-agent/llm"
 	"company.com/data-analysis-agent/mcpclient"
 )
@@ -59,6 +61,7 @@ func (a *Agent) initMCP(cfg *config.Config) error {
 		// 远程 MCP 服务对接（无需本地子进程）
 		builtin = false
 		fmt.Printf("[agent] 使用远程 MCP 对接: %s (transport=%s)\n", cfg.MCP.BaseURL, transportName(cfg.MCP.Transport))
+		logger.Infof("[agent] 使用远程 MCP 对接: %s (transport=%s)", cfg.MCP.BaseURL, transportName(cfg.MCP.Transport))
 		mcp, err = mcpclient.StartRemote(mcpclient.RemoteConfig{
 			BaseURL:   cfg.MCP.BaseURL,
 			Transport: cfg.MCP.Transport,
@@ -70,14 +73,16 @@ func (a *Agent) initMCP(cfg *config.Config) error {
 		// 本地内置 mcp-data-server 子进程
 		builtin = true
 		fmt.Printf("[agent] 使用本地内置 MCP 对接: %s\n", cfg.MCP.ServerPath)
+		logger.Infof("[agent] 使用本地内置 MCP 对接: %s", cfg.MCP.ServerPath)
 		mcp, err = mcpclient.Start(mcpclient.StartConfig{
-			ServerPath:  cfg.MCP.ServerPath,
-			DBDialect:   cfg.MCP.DBDialect,
-			DBDsn:       cfg.MCP.DBDsn,
-			Env:         cfg.MCP.Env,
-			MaskEnabled: cfg.MCP.MaskEnabled,
-			SeedDemo:    cfg.MCP.SeedDemo,
-			WorkDir:     cfg.MCP.WorkDir,
+			ServerPath:     cfg.MCP.ServerPath,
+			DBDialect:      cfg.MCP.DBDialect,
+			DBDsn:          cfg.MCP.DBDsn,
+			Env:            cfg.MCP.Env,
+			MaskEnabled:    cfg.MCP.MaskEnabled,
+			SeedDemo:       cfg.MCP.SeedDemo,
+			WorkDir:        cfg.MCP.WorkDir,
+			SandboxEnabled: cfg.MCP.SandboxEnabled,
 		})
 	}
 	if err != nil {
@@ -125,7 +130,7 @@ func (a *Agent) ApplyConfig(cfg *config.Config) error {
 
 	// 仅当 MCP 相关配置发生变化时才重建连接（避免无谓地重启子进程）。
 	if mcpConfigChanged(a.cfg.MCP, cfg.MCP) {
-		fmt.Printf("[agent] 检测到 MCP 配置变化，重建 MCP 连接...\n")
+		logger.Infof("[agent] 检测到 MCP 配置变化，重建 MCP 连接...")
 		old := a.mcp
 		if err := a.initMCP(cfg); err != nil {
 			return err
@@ -138,6 +143,10 @@ func (a *Agent) ApplyConfig(cfg *config.Config) error {
 		// MCP 配置未变，仅同步其他字段（如凭据被后台修改也同步）。
 		a.cfg.MCP = cfg.MCP
 	}
+
+	// 日志开关热更新：后台修改“保存日志到文件”即时生效，无需重启。
+	logger.SetSaveToFile(cfg.Log.SaveToFile)
+	logger.SetDir(cfg.Log.Dir)
 	return nil
 }
 
@@ -158,6 +167,7 @@ func mcpConfigChanged(a, b config.MCPConfig) bool {
 		a.MaskEnabled != b.MaskEnabled ||
 		a.SeedDemo != b.SeedDemo ||
 		a.WorkDir != b.WorkDir ||
+		a.SandboxEnabled != b.SandboxEnabled ||
 		a.Username != b.Username ||
 		a.Password != b.Password ||
 		a.BaseURL != b.BaseURL ||
@@ -189,7 +199,7 @@ func (a *Agent) login() error {
 	text, isErr, err := a.mcp.CallTool("auth_login", map[string]interface{}{
 		"username": a.cfg.MCP.Username,
 		"password": a.cfg.MCP.Password,
-	})
+	}, nil)
 	if err != nil {
 		return fmt.Errorf("mcp auth_login: %w", err)
 	}
@@ -209,6 +219,7 @@ func (a *Agent) login() error {
 	}
 	a.token = res.Token
 	fmt.Printf("[agent] 已以账号 %s 登录，角色=%s，token 已就绪\n", a.cfg.MCP.Username, res.Role)
+	logger.Infof("[agent] MCP 登录成功: 账号=%s 角色=%s", a.cfg.MCP.Username, res.Role)
 	return nil
 }
 
@@ -238,9 +249,11 @@ func (a *Agent) connectExtraMCPs(cfg *config.Config) {
 		})
 		if err != nil {
 			fmt.Printf("[agent] 额外 MCP [%s] 连接失败（已跳过）: %v\n", name, err)
+		logger.Warnf("[agent] 额外 MCP [%s] 连接失败（已跳过）: %v", name, err)
 			continue
 		}
 		fmt.Printf("[agent] 已对接额外 MCP [%s]: %s，发现 %d 个工具\n", name, m.BaseURL, len(cli.Tools()))
+		logger.Infof("[agent] 已对接额外 MCP [%s]: %s，发现 %d 个工具", name, m.BaseURL, len(cli.Tools()))
 		a.extraMCPs = append(a.extraMCPs, &extraMCP{name: name, client: cli})
 	}
 }
@@ -409,6 +422,31 @@ func (a *Agent) localDataTools() []llm.Tool {
 				},
 			},
 		},
+		// --- 联网查询（由内置 mcp-data-server 提供，无需 API key） ---
+		llm.Tool{
+			Name:        "web_search",
+			Description: "联网搜索（基于 DuckDuckGo，无需 API key）。返回相关网页的标题、链接与摘要，用于获取实时或外部信息（如最新新闻、公开资料）。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"query": map[string]interface{}{"type": "string", "description": "搜索关键词，如「2024 年中国 GDP 增速」"},
+					"limit": map[string]interface{}{"type": "integer", "description": "返回结果条数，默认5，最大10"},
+				},
+				"required": []string{"query"},
+			},
+		},
+		llm.Tool{
+			Name:        "web_fetch",
+			Description: "抓取指定网页 URL 并提取正文纯文本（自动去除脚本/样式噪声）。用于读取搜索结果的具体内容、新闻正文、公开文档。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"url":       map[string]interface{}{"type": "string", "description": "目标网页地址，需以 http:// 或 https:// 开头"},
+					"max_chars": map[string]interface{}{"type": "integer", "description": "返回正文最大字符数，默认8000，最大40000"},
+				},
+				"required": []string{"url"},
+			},
+		},
 	)
 	return tools
 }
@@ -422,7 +460,7 @@ func (a *Agent) loadSchema(tables []string) string {
 		text, isErr, err := a.mcp.CallTool("describe_table", map[string]interface{}{
 			"token": a.token,
 			"table": t,
-		})
+		}, nil)
 		if err != nil || isErr || text == "" {
 			continue
 		}
@@ -460,6 +498,7 @@ type AskOptions struct {
 	Model       string  `json:"model"`        // 覆盖模型名
 	Temperature float64 `json:"temperature"`  // 覆盖生成温度（<=0 表示沿用）
 	MaxTokens   int     `json:"max_tokens"`   // 覆盖单次生成上限（<=0 表示沿用）
+	EnableChart *bool   `json:"enable_chart"` // 是否允许模型生成图表；nil=沿用（开启），false=关闭
 	// OnEvent 流式回调：处理过程中逐步推送事件（步骤/最终回答/图表/表格）。
 	// 为 nil 时退化为非流式（仅返回最终 AskResult）。
 	OnEvent func(StreamEvent)
@@ -469,10 +508,14 @@ type AskOptions struct {
 type StreamEventKind string
 
 const (
-	EventStep   StreamEventKind = "step"   // 一次工具调用完成（含步骤日志）
-	EventAnswer StreamEventKind = "answer" // 最终文字结论（一次性给出，因为底层 LLM 非流式）
-	EventDone   StreamEventKind = "done"   // 整轮处理完成
-	EventError  StreamEventKind = "error"  // 处理出错
+	EventStepStart   StreamEventKind = "step_start"   // 一次工具调用开始（含工具名/参数，工具执行期间持续展示“调用中”）
+	EventStep        StreamEventKind = "step"         // 一次工具调用完成（含步骤日志）
+	EventStepProgress StreamEventKind = "step_progress" // 工具执行期间的流式进度（如「已读取 N 行」），前端实时刷新“调用中”卡片
+	EventThinking    StreamEventKind = "thinking"     // LLM 思考阶段（尚未产出 token/工具调用）；调用方可据此显示“思考中…”避免像卡死
+	EventAnswerDelta StreamEventKind = "answer_delta" // 最终回答的增量文本（逐 token 推送，实现打字机效果）
+	EventAnswer      StreamEventKind = "answer"       // 最终文字结论（完整文本，流式结束时兜底/校正）
+	EventDone        StreamEventKind = "done"         // 整轮处理完成
+	EventError       StreamEventKind = "error"        // 处理出错
 )
 
 // StreamEvent 流式处理过程中的一个事件。
@@ -493,6 +536,19 @@ func (a *Agent) LLMInfo() map[string]interface{} {
 		"model":       a.cfg.LLM.Model,
 		"temperature": a.cfg.LLM.Temperature,
 		"max_tokens":  a.cfg.LLM.MaxTokens,
+	}
+}
+
+// MemoryInfo 返回当前生效的记忆窗口配置，供 server 读取历史条数上限。
+func (a *Agent) MemoryInfo() map[string]int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	mh := a.cfg.Agent.MemoryMaxHistory
+	if mh == 0 {
+		mh = 30
+	}
+	return map[string]int{
+		"max_history": mh,
 	}
 }
 
@@ -575,16 +631,42 @@ func (a *Agent) AskRichWithHistory(history []HistoryItem, question string, opts 
 	// 若前端携带覆盖项，则本次使用一个临时 LLM 客户端，不影响全局运行配置。
 	llmClient := a.resolveLLMClient(opts)
 
+	// 图表开关：关闭时从暴露给模型的工具列表中移除图表工具（render_chart），
+	// 模型便不会生成图表；最终结果的 Chart 也会在返回前清空。
+	chartEnabled := opts == nil || opts.EnableChart == nil || *opts.EnableChart
+	toolsForLLM := a.tools
+	if !chartEnabled {
+		filtered := make([]llm.Tool, 0, len(toolsForLLM))
+		for _, t := range toolsForLLM {
+			if t.Name == "render_chart" {
+				continue
+			}
+			filtered = append(filtered, t)
+		}
+		toolsForLLM = filtered
+	}
+
 	system := a.systemPrompt()
 	messages := []llm.Message{
 		{Role: "system", Content: system},
 	}
 
 	// 记忆层：组织历史上下文（结构化回放 + 早期摘要压缩）。
+	// 记忆窗口参数从运行配置读取（后台可热更新），不再固定写死。
 	var summary string
 	var histMsgs []llm.Message
 	if len(history) > 0 {
-		summary, histMsgs = a.buildMemoryContext(history, defaultMemoryConfig(), llmClient)
+		mc := defaultMemoryConfig()
+		if a.cfg.Agent.MemorySummaryThreshold > 0 {
+			mc.SummaryThreshold = a.cfg.Agent.MemorySummaryThreshold
+		}
+		if a.cfg.Agent.MemoryRecentKeep > 0 {
+			mc.RecentKeep = a.cfg.Agent.MemoryRecentKeep
+		}
+		if a.cfg.Agent.MemoryMaxHistory > 0 {
+			mc.MaxHistory = a.cfg.Agent.MemoryMaxHistory
+		}
+		summary, histMsgs = a.buildMemoryContext(history, mc, llmClient)
 	}
 	if summary != "" {
 		memPrompt := "以下是本次对话较早阶段的记忆摘要，请结合它理解用户的连续意图：\n" + summary
@@ -603,10 +685,38 @@ func (a *Agent) AskRichWithHistory(history []HistoryItem, question string, opts 
 	for step := 0; step < a.cfg.Agent.MaxSteps; step++ {
 		var resp *llm.Response
 		var err error
+
+		// 进入 LLM 思考阶段（模型正在生成首个 token / 决策工具调用）。
+		// 调用方（CLI/前端）可据此显示“思考中…”，避免迟迟无数据像卡死。
+		onEvent(StreamEvent{Kind: EventThinking})
+
+		// 逐 token 回调：若调用方提供了 OnEvent，则实时推送增量文本（打字机效果）；
+		// 否则静默（非流式路径，仅返回完整结果）。
+		var iterText strings.Builder
+		suppress := false // 退化模式下遇到 ```json 工具块后抑制，避免泄漏到回答流
+		onToken := func(delta string) {
+			if delta == "" || opts == nil || opts.OnEvent == nil {
+				return
+			}
+			if !a.cfg.Agent.UseNativeTools {
+				if suppress {
+					iterText.WriteString(delta)
+					return
+				}
+				if strings.Contains(iterText.String()+delta, "```json") {
+					suppress = true
+					iterText.WriteString(delta)
+					return
+				}
+			}
+			iterText.WriteString(delta)
+			onEvent(StreamEvent{Kind: EventAnswerDelta, Text: delta})
+		}
+
 		if a.cfg.Agent.UseNativeTools {
-			resp, err = llmClient.Chat(messages, a.tools)
+			resp, err = llmClient.ChatStream(messages, toolsForLLM, onToken)
 		} else {
-			resp, err = llmClient.Chat(messages, nil)
+			resp, err = llmClient.ChatStream(messages, nil, onToken)
 			// 退化模式：尝试从文本中解析工具调用
 			if err == nil {
 				resp = a.parseFallbackToolCall(resp, &messages)
@@ -618,6 +728,9 @@ func (a *Agent) AskRichWithHistory(history []HistoryItem, question string, opts 
 
 		// 没有工具调用 -> 视为最终回答
 		if len(resp.ToolCalls) == 0 {
+			if !chartEnabled {
+				result.Chart = nil // 图表关闭：确保不返回图表
+			}
 			result.Answer = strings.TrimSpace(resp.Content)
 			onEvent(StreamEvent{Kind: EventAnswer, Text: result.Answer})
 			onEvent(StreamEvent{Kind: EventDone})
@@ -627,14 +740,63 @@ func (a *Agent) AskRichWithHistory(history []HistoryItem, question string, opts 
 		// 执行所有工具调用，结果作为 tool 消息回灌
 		for _, tc := range resp.ToolCalls {
 			fmt.Printf("[agent] 模型请求调用工具: %s 参数=%s\n", tc.Name, tc.Arguments)
-			toolResult := a.executeTool(tc, result)
-			fmt.Printf("[agent] 工具返回(已截断): %s\n", truncate(toolResult, 300))
-			stepLog := StepLog{Tool: tc.Name, Args: tc.Arguments, Result: truncate(toolResult, 500)}
+			logger.Infof("[agent] 工具调用请求: %s 参数=%s", tc.Name, logger.Sanitize(tc.Arguments))
+			// 工具调用开始：先推送“调用中”事件，让前端在工具执行期间（可能较久）有持续反馈，避免像卡死。
+			onEvent(StreamEvent{Kind: EventStepStart, Step: &StepLog{Tool: tc.Name, Args: tc.Arguments}})
+
+			// 在独立 goroutine 执行工具，主协程在等待期间周期性推送“执行中”心跳，
+			// 保证前端持续有反馈（流式、不卡死）；工具自身的真实进度（如已读取行数）
+			// 经 onProgress 即时推给前端。事件统一经 channel 回到主协程消费，避免并发写 SSE。
+			evCh := make(chan StreamEvent, 32)
+			resCh := make(chan string, 1)
+			var gotRealProgress atomic.Bool
+			go func() {
+				text := a.executeTool(tc, result, func(message string) {
+					gotRealProgress.Store(true)
+					evCh <- StreamEvent{Kind: EventStepProgress, Step: &StepLog{Tool: tc.Name, Progress: message}}
+				})
+				resCh <- text
+			}()
+
+			ticker := time.NewTicker(900 * time.Millisecond)
+			var toolResult string
+		waitLoop:
+			for {
+				select {
+				case ev := <-evCh:
+					onEvent(ev)
+				case text := <-resCh:
+					toolResult = text
+					break waitLoop
+				case <-ticker.C:
+					// 心跳：仅在尚无真实进度时告知前端“正在执行”，避免与真实进度文本互相覆盖。
+					if !gotRealProgress.Load() {
+						onEvent(StreamEvent{Kind: EventStepProgress, Step: &StepLog{Tool: tc.Name, Progress: "工具执行中…"}})
+					}
+				}
+			}
+			ticker.Stop()
+			// 排空工具 goroutine 中可能残留的进度事件
+		drainLoop:
+			for {
+				select {
+				case ev := <-evCh:
+					onEvent(ev)
+				default:
+					break drainLoop
+				}
+			}
+
+			fmt.Printf("[agent] 工具返回(完整, 仅日志截断显示): %s\n", truncate(toolResult, 200))
+			logger.Infof("[agent] 工具返回: %s 结果(前200)=%s", tc.Name, logger.Sanitize(truncate(toolResult, 200)))
+			// 展示用步骤日志：保留完整结果，前端“分析过程”不再截断。
+			// 喂给 LLM 上下文的则在下方 messages 中用 truncateResult 按行数裁剪，防止上下文膨胀。
+			stepLog := StepLog{Tool: tc.Name, Args: tc.Arguments, Result: toolResult}
 			result.Steps = append(result.Steps, stepLog)
 			onEvent(StreamEvent{Kind: EventStep, Step: &stepLog})
 			messages = append(messages,
 				llm.Message{Role: "assistant", Content: resp.Content, ToolCalls: []llm.ToolCall{tc}},
-				llm.Message{Role: "tool", Content: toolResult, ToolCallID: tc.ID, Name: tc.Name},
+				llm.Message{Role: "tool", Content: a.truncateResult(toolResult), ToolCallID: tc.ID, Name: tc.Name},
 			)
 		}
 	}
@@ -644,7 +806,8 @@ func (a *Agent) AskRichWithHistory(history []HistoryItem, question string, opts 
 }
 
 // executeTool 执行一个工具调用：解析参数后按工具名在注册表中查找并执行（picoclaw 风格统一分发）。
-func (a *Agent) executeTool(tc llm.ToolCall, result *AskResult) string {
+// onProgress 非 nil 时，工具执行期间的进度（如已读取行数）会经其推流给前端。
+func (a *Agent) executeTool(tc llm.ToolCall, result *AskResult, onProgress func(message string)) string {
 	var args map[string]interface{}
 	if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
 		return fmt.Sprintf("工具参数解析失败: %v", err)
@@ -653,7 +816,7 @@ func (a *Agent) executeTool(tc llm.ToolCall, result *AskResult) string {
 	if !ok {
 		return fmt.Sprintf("未知工具: %s", tc.Name)
 	}
-	text, err := run(args, result)
+	text, err := run(args, result, onProgress)
 	if err != nil {
 		return "工具执行失败: " + err.Error()
 	}

@@ -35,24 +35,25 @@
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Roboto, Helvetica, Arial, sans-serif;
     font-size: 15px; line-height: 1.6; -webkit-text-size-adjust: 100%;
   }
-  .app { height: 100%; max-width: 980px; margin: 0 auto; display: flex; flex-direction: column; background: var(--bg); }
-  .topbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--border); background: var(--panel); flex-wrap: wrap; }
-  .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
-  .logo { font-size: 24px; }
-  .title { font-size: 16px; font-weight: 700; white-space: nowrap; }
+  .app { height: 100%; max-width: 980px; margin: 0 auto; display: flex; flex-direction: column; background: var(--bg); position: relative; }
+  .topbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 14px 18px; border-bottom: 1px solid var(--border); background: var(--panel); flex-wrap: wrap; position: sticky; top: 0; z-index: 5; }
+  .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+  .logo { font-size: 26px; filter: drop-shadow(0 2px 6px rgba(79,140,255,0.35)); }
+  .title { font-size: 16px; font-weight: 800; letter-spacing: .3px; white-space: nowrap; background: linear-gradient(135deg, var(--accent), var(--accent-2)); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
   .subtitle { font-size: 11px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .actions { display: flex; align-items: center; gap: 8px; }
-  .status { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ok); white-space: nowrap; }
-  .status.off { color: var(--warn); }
-  .status .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
-  .icon-btn { background: var(--panel-2); border: 1px solid var(--border); color: var(--text-dim); border-radius: 8px; padding: 7px 10px; font-size: 13px; cursor: pointer; text-decoration: none; white-space: nowrap; }
-  .icon-btn:hover { color: var(--text); border-color: var(--accent); }
-  .chat { flex: 1; overflow-y: auto; padding: 18px 16px; display: flex; flex-direction: column; gap: 16px; -webkit-overflow-scrolling: touch; }
-  .row { display: flex; gap: 10px; align-items: flex-start; }
+  .status { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ok); white-space: nowrap; padding: 4px 10px; background: rgba(46,194,126,0.10); border: 1px solid rgba(46,194,126,0.25); border-radius: 999px; }
+  .status.off { color: var(--warn); background: rgba(255,176,32,0.10); border-color: rgba(255,176,32,0.25); }
+  .status .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 3px rgba(46,194,126,0.15); }
+  .status.off .dot { box-shadow: 0 0 0 3px rgba(255,176,32,0.15); }
+  .icon-btn { background: var(--panel-2); border: 1px solid var(--border); color: var(--text-dim); border-radius: 9px; padding: 7px 11px; font-size: 13px; cursor: pointer; text-decoration: none; white-space: nowrap; transition: all .15s; }
+  .icon-btn:hover { color: var(--text); border-color: var(--accent); background: var(--panel); box-shadow: 0 2px 10px rgba(79,140,255,0.12); }
+  .chat { flex: 1; overflow-y: auto; padding: 22px 18px; display: flex; flex-direction: column; gap: 16px; -webkit-overflow-scrolling: touch; }
+  .row { display: flex; gap: 12px; align-items: flex-start; }
   .row.user { flex-direction: row-reverse; }
-  .avatar { flex: 0 0 32px; width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; background: var(--panel-2); color: var(--text-dim); }
-  .row.user .avatar { background: var(--user-bubble); color: #fff; }
-  .bubble { max-width: 82%; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 11px 13px; overflow-wrap: anywhere; word-break: break-word; }
+  .avatar { flex: 0 0 34px; width: 34px; height: 34px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; box-shadow: 0 2px 8px rgba(79,140,255,0.25); }
+  .row.user .avatar { background: linear-gradient(135deg, #2b6cff, #1e4fd6); }
+  .bubble { max-width: 82%; background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 12px 14px; overflow-wrap: anywhere; word-break: break-word; }
   .row.user .bubble { background: var(--user-bubble); border-color: transparent; color: #fff; }
   .bubble.error { border-color: var(--err); }
   .bubble .md p { margin: 0 0 8px; } .bubble .md p:last-child { margin-bottom: 0; }
@@ -75,33 +76,53 @@
   .step-tool { font-size: 12px; color: var(--accent); margin-bottom: 4px; }
   .step pre { font-size: 12px; color: var(--text-dim); white-space: pre-wrap; word-break: break-word; margin: 2px 0 0; }
   .step .step-result { color: #9fb4d0; }
+  /* 分析过程结果不截断：内容过长时限高滚动，避免撑爆布局；可点击"展开全部"解除限高。 */
+  .step .step-result { max-height: 260px; overflow: auto; }
+  .step .step-result.expanded { max-height: none; }
+  .step-more { display: inline-block; margin-top: 6px; font-size: 12px; color: var(--accent); cursor: pointer; user-select: none; }
+  .step-more:hover { text-decoration: underline; }
+  /* 工具"调用中"步骤：持续展示进度，避免执行期间像卡死 */
+  .step.pending { border-color: var(--accent); }
+  .step.pending .step-tool { color: var(--accent); display: flex; align-items: center; gap: 8px; }
+  .step.pending .spin { width: 12px; height: 12px; border: 2px solid var(--accent); border-top-color: transparent; border-radius: 50%; animation: spin 0.7s linear infinite; flex: 0 0 auto; }
+  .step.pending .step-wait { font-size: 12px; color: var(--text-dim); }
+  .step.pending .step-args { font-size: 12px; color: var(--text-dim); white-space: pre-wrap; word-break: break-word; margin: 4px 0 0; opacity: .85; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .step { animation: pop .18s ease; }
   .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { padding: 7px 11px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
   th { background: var(--panel-2); color: var(--text-dim); font-weight: 600; position: sticky; top: 0; }
   tbody tr:hover td { background: rgba(79,140,255,0.06); }
   .more { padding: 6px 11px; font-size: 12px; color: var(--text-dim); }
-  canvas.chart { width: 100%; height: 260px; display: block; }
-  .samples { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 16px 8px; }
-  .samples button { background: var(--panel-2); border: 1px solid var(--border); color: var(--text-dim); border-radius: 16px; padding: 6px 13px; font-size: 13px; cursor: pointer; }
-  .samples button:hover { color: var(--text); border-color: var(--accent); }
-  .composer { display: flex; gap: 10px; padding: 12px 16px; border-top: 1px solid var(--border); background: var(--panel); align-items: flex-end; }
-  .composer textarea { flex: 1; resize: none; background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; color: var(--text); padding: 10px 12px; font-size: 14px; font-family: inherit; line-height: 1.5; max-height: 140px; min-height: 44px; }
-  .composer textarea:focus { outline: none; border-color: var(--accent); }
-  .send { flex: 0 0 auto; background: linear-gradient(135deg, var(--accent), var(--accent-2)); border: none; color: #fff; border-radius: 10px; padding: 0 20px; height: 44px; font-size: 14px; font-weight: 600; cursor: pointer; }
+  canvas.chart { width: 100%; height: 260px; display: block; border-radius: 10px; background: linear-gradient(180deg, rgba(79,140,255,0.04), transparent); }
+  .chart.block, .sql.block, .table-wrap.block, .steps.block { margin-top: 12px; }
+  .chart.block { padding: 10px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px; }
+  .samples { display: flex; flex-wrap: wrap; gap: 10px; padding: 4px 18px 10px; }
+  .samples button { background: var(--panel); border: 1px solid var(--border); color: var(--text-dim); border-radius: 12px; padding: 9px 14px; font-size: 13px; cursor: pointer; transition: all .15s; display: flex; align-items: center; gap: 6px; }
+  .samples button::before { content: "💡"; font-size: 12px; opacity: .8; }
+  .samples button:hover { color: var(--text); border-color: var(--accent); background: var(--panel-2); transform: translateY(-1px); box-shadow: 0 4px 14px rgba(79,140,255,0.14); }
+  .composer { display: flex; gap: 10px; padding: 14px 18px; border-top: 1px solid var(--border); background: var(--panel); align-items: flex-end; }
+  .composer textarea { flex: 1; resize: none; background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px; color: var(--text); padding: 11px 14px; font-size: 14px; font-family: inherit; line-height: 1.5; max-height: 140px; min-height: 46px; transition: border-color .15s, box-shadow .15s; }
+  .composer textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(79,140,255,0.15); }
+  .send { flex: 0 0 auto; background: linear-gradient(135deg, var(--accent), var(--accent-2)); border: none; color: #fff; border-radius: 12px; padding: 0 22px; height: 46px; font-size: 14px; font-weight: 600; cursor: pointer; box-shadow: 0 4px 14px rgba(79,140,255,0.25); transition: transform .1s, box-shadow .15s; }
+  .send:hover { box-shadow: 0 6px 18px rgba(79,140,255,0.35); }
+  .send:active { transform: scale(.97); }
   .send:disabled { opacity: 0.5; cursor: not-allowed; }
-  .typing { display: inline-flex; gap: 4px; }
-  .typing i { width: 6px; height: 6px; border-radius: 50%; background: var(--text-dim); animation: blink 1.2s infinite ease-in-out; }
+  .typing { display: inline-flex; align-items: center; gap: 8px; }
+  .typing .dots { display: inline-flex; gap: 4px; }
+  .typing i { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: blink 1.2s infinite ease-in-out; }
   .typing i:nth-child(2) { animation-delay: 0.2s; }
   .typing i:nth-child(3) { animation-delay: 0.4s; }
+  .typing .thinking-text { font-size: 13px; color: var(--text-dim); }
   @keyframes blink { 0%, 80%, 100% { opacity: 0.2; } 40% { opacity: 1; } }
   .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: none; z-index: 20; }
   .overlay.show { display: block; }
   .drawer { position: fixed; top: 0; right: 0; height: 100%; width: 340px; max-width: 90vw; background: var(--panel); border-left: 1px solid var(--border); transform: translateX(100%); transition: transform 0.22s ease; z-index: 21; display: flex; flex-direction: column; }
   .drawer.show { transform: translateX(0); }
-  .drawer h3 { margin: 0; padding: 16px; border-bottom: 1px solid var(--border); font-size: 15px; }
-  .drawer .body { padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; }
-  .field label { display: block; font-size: 13px; color: var(--text-dim); margin-bottom: 6px; }
+  .drawer h3 { margin: 0; padding: 18px 18px; border-bottom: 1px solid var(--border); font-size: 16px; font-weight: 700; }
+  .drawer .body { padding: 18px; overflow-y: auto; display: flex; flex-direction: column; gap: 18px; }
+  .field label { display: block; font-size: 13px; color: var(--text-dim); margin-bottom: 6px; font-weight: 600; }
   .field input[type="text"], .field input[type="number"], .field select { width: 100%; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 9px 11px; font-size: 14px; font-family: inherit; }
   .field input:focus, .field select:focus { outline: none; border-color: var(--accent); }
   .field .hint { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
@@ -123,16 +144,18 @@
   /* ---- 布局：会话侧栏 + 主区 ---- */
   .layout { height: 100%; display: flex; }
   .sidebar { flex: 0 0 260px; width: 260px; background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
-  .sidebar .sb-head { padding: 12px; border-bottom: 1px solid var(--border); }
-  .newconv { width: 100%; background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; border: none; border-radius: 8px; padding: 10px; font-size: 14px; font-weight: 600; cursor: pointer; }
-  .conv-list { flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 4px; }
-  .conv-item { display: flex; align-items: center; gap: 6px; padding: 9px 10px; border-radius: 8px; cursor: pointer; color: var(--text-dim); font-size: 13px; }
+  .sidebar .sb-head { padding: 14px; border-bottom: 1px solid var(--border); }
+  .newconv { width: 100%; background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; border: none; border-radius: 10px; padding: 11px; font-size: 14px; font-weight: 600; cursor: pointer; box-shadow: 0 4px 14px rgba(79,140,255,0.22); transition: transform .1s, box-shadow .15s; }
+  .newconv:hover { box-shadow: 0 6px 18px rgba(79,140,255,0.32); }
+  .newconv:active { transform: scale(.98); }
+  .conv-list { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 4px; }
+  .conv-item { display: flex; align-items: center; gap: 6px; padding: 10px 11px; border-radius: 10px; cursor: pointer; color: var(--text-dim); font-size: 13px; transition: background .15s, color .15s; }
   .conv-item:hover { background: var(--panel-2); color: var(--text); }
-  .conv-item.active { background: var(--panel-2); color: var(--text); border: 1px solid var(--accent); }
+  .conv-item.active { background: var(--panel-2); color: var(--text); border: 1px solid var(--accent); box-shadow: 0 2px 10px rgba(79,140,255,0.12); }
   .conv-item .ct { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .conv-item .del { opacity: 0; background: transparent; border: none; color: var(--err); cursor: pointer; font-size: 13px; }
+  .conv-item .del { opacity: 0; background: transparent; border: none; color: var(--err); cursor: pointer; font-size: 13px; transition: opacity .15s; }
   .conv-item:hover .del { opacity: 1; }
-  .sidebar .sb-foot { padding: 10px 12px; border-top: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; }
+  .sidebar .sb-foot { padding: 12px 14px; border-top: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; }
   .sidebar .sb-foot .uname { color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .main { flex: 1; min-width: 0; }
   .app { height: 100%; margin: 0; display: flex; flex-direction: column; background: var(--bg); max-width: none; }
@@ -152,15 +175,34 @@
   .auth-mask { position: fixed; inset: 0; background: var(--bg); display: none; align-items: center; justify-content: center; z-index: 50; padding: 20px; }
   .auth-mask.show { display: flex; }
   .auth-card { width: 360px; max-width: 100%; background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 26px 22px; }
-  .auth-card h2 { margin: 0 0 4px; font-size: 20px; }
-  .auth-card .sub { color: var(--text-dim); font-size: 13px; margin-bottom: 18px; }
+  .auth-card h2 { margin: 0 0 4px; font-size: 22px; font-weight: 800; background: linear-gradient(135deg, var(--accent), var(--accent-2)); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+  .auth-card .sub { color: var(--text-dim); font-size: 13px; margin-bottom: 20px; }
   .auth-card .field { margin-bottom: 14px; }
-  .auth-card input { width: 100%; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 11px 12px; font-size: 14px; }
-  .auth-card input:focus { outline: none; border-color: var(--accent); }
+  .auth-card input { width: 100%; background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; color: var(--text); padding: 12px 13px; font-size: 14px; transition: border-color .15s, box-shadow .15s; }
+  .auth-card input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(79,140,255,0.15); }
   .auth-card .primary { width: 100%; background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; border: none; border-radius: 8px; padding: 12px; font-size: 15px; font-weight: 600; cursor: pointer; margin-top: 4px; }
   .auth-card .switch-line { text-align: center; margin-top: 14px; font-size: 13px; color: var(--text-dim); }
   .auth-card .switch-line a { color: var(--accent); cursor: pointer; }
   .auth-card .err { color: var(--err); font-size: 13px; min-height: 18px; margin-top: 6px; }
+  /* ---- 流式打字光标 / 代码复制 / 细节优化 ---- */
+  .md.streaming::after { content: "▌"; display: inline-block; margin-left: 1px; color: var(--accent); font-weight: 400; animation: blink 1s steps(2, start) infinite; }
+  .bubble .md pre { position: relative; }
+  .sql pre { position: relative; }
+  .copy-btn { position: absolute; top: 6px; right: 6px; background: rgba(255,255,255,0.08); border: 1px solid var(--border); color: var(--text-dim); border-radius: 6px; padding: 2px 8px; font-size: 11px; line-height: 1.4; cursor: pointer; opacity: 0; transition: opacity .15s, color .15s, border-color .15s; }
+  .bubble .md pre:hover .copy-btn, .sql pre:hover .copy-btn { opacity: 1; }
+  .copy-btn:hover { color: var(--text); border-color: var(--accent); }
+  .copy-btn.ok { color: var(--ok); border-color: var(--ok); }
+  .row.assistant .bubble > * { animation: pop .18s ease; }
+  @keyframes pop { from { opacity: .35; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+  .chat::-webkit-scrollbar, .conv-list::-webkit-scrollbar, .drawer .body::-webkit-scrollbar { width: 8px; }
+  .chat::-webkit-scrollbar-thumb, .conv-list::-webkit-scrollbar-thumb, .drawer .body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 8px; }
+  .app { background: radial-gradient(1100px 560px at 50% -12%, rgba(79,140,255,0.10), transparent 60%), var(--bg); }
+  .layout { background: radial-gradient(1200px 600px at 80% -10%, rgba(124,92,255,0.07), transparent 55%), var(--bg); }
+  .bubble { box-shadow: 0 1px 2px rgba(0,0,0,.18); transition: box-shadow .2s; }
+  .send.stop { background: linear-gradient(135deg, #ff6b6b, #ff8e53); }
+  .topbar { backdrop-filter: saturate(1.2); }
+  .samples button { transition: color .15s, border-color .15s, transform .1s; }
+  .samples button:active { transform: scale(.97); }
 </style>
 </head>
 <body>
@@ -238,6 +280,10 @@
     <div class="switch-row">
       <span class="desc">默认展开分析过程</span>
       <label class="switch"><input type="checkbox" id="setSteps" /><span class="slider"></span></label>
+    </div>
+    <div class="switch-row">
+      <span class="desc">图表输出</span>
+      <label class="switch"><input type="checkbox" id="setChart" /><span class="slider"></span></label>
     </div>
     <div class="field">
       <label>主题 Theme</label>
@@ -437,7 +483,9 @@
     charts = [];
     // 欢迎语
     var row = document.createElement("div"); row.className = "row assistant";
-    row.innerHTML = '<div class="avatar">AI</div><div class="bubble"><div class="md"><p>你好，我是数据分析助手。用自然语言提问，我会自动生成 SQL、经 MCP 权限校验后查询数据库，并在合适时生成图表。试试下面的示例问题吧。</p></div></div>';
+    row.innerHTML = '<div class="avatar">AI</div><div class="bubble"><div class="md">'
+      + '<p style="margin-bottom:6px"><strong>👋 你好，我是数据分析助手</strong></p>'
+      + '<p>用自然语言提问，我会自动生成 SQL、经 MCP 权限校验后查询数据库，并在合适时生成图表。下面是一些可以试试的问题：</p></div></div>';
     chatEl.appendChild(row);
     samplesEl.style.display = "";
   }
@@ -468,7 +516,7 @@
       var s = JSON.parse(localStorage.getItem(SETTINGS_KEY));
       if (s) return s;
     } catch (e) {}
-    return { model: "", temperature: 0, max_tokens: 0, showSteps: false, theme: "auto", auto: true };
+    return { model: "", temperature: 0, max_tokens: 0, showSteps: false, enableChart: true, theme: "auto", auto: true };
   }
   function saveSettings() { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); }
   function applyTheme() { document.documentElement.setAttribute("data-theme", settings.theme || "auto"); }
@@ -485,6 +533,37 @@
   fetch("/api/health").then(function (r) { return r.ok; }).then(setOnline).catch(function () { setOnline(false); });
 
   function scrollBottom() { if (settings.auto) chatEl.scrollTop = chatEl.scrollHeight; }
+  function isNearBottom() { return chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight < 80; }
+  // 仅当用户已贴近底部时才自动滚动，避免"回看历史"时被强制拽到底部。
+  function scrollIfNearBottom() { if (settings.auto && isNearBottom()) chatEl.scrollTop = chatEl.scrollHeight; }
+  function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text);
+    return new Promise(function (resolve) {
+      var ta = document.createElement("textarea");
+      ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); } catch (e) {}
+      document.body.removeChild(ta); resolve();
+    });
+  }
+  // 为容器内的每个代码块（.md pre 与 .sql pre）追加"复制"按钮。
+  function addCopyButtons(root) {
+    if (!root) return;
+    var pres = root.querySelectorAll("pre");
+    Array.prototype.forEach.call(pres, function (pre) {
+      if (pre.querySelector(".copy-btn")) return;
+      var btn = document.createElement("button");
+      btn.className = "copy-btn"; btn.type = "button"; btn.textContent = "复制";
+      btn.onclick = function () {
+        var code = pre.querySelector("code") ? pre.querySelector("code").innerText : pre.innerText;
+        copyText(code).then(function () {
+          btn.textContent = "已复制"; btn.classList.add("ok");
+          setTimeout(function () { btn.textContent = "复制"; btn.classList.remove("ok"); }, 1200);
+        });
+      };
+      pre.appendChild(btn);
+    });
+  }
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, function (c) {
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
@@ -651,6 +730,7 @@
 
     var md = document.createElement("div"); md.className = "md";
     md.innerHTML = renderMarkdown(res.answer || "(无文字结论)");
+    addCopyButtons(md);
     bubble.appendChild(md);
 
     if (res.chart) {
@@ -665,6 +745,7 @@
       var lab = document.createElement("div"); lab.className = "sql-label"; lab.textContent = "执行 SQL";
       var pre = document.createElement("pre"); pre.textContent = res.sql;
       sql.appendChild(lab); sql.appendChild(pre); bubble.appendChild(sql);
+      addCopyButtons(sql);
     }
     if (res.steps && res.steps.length) {
       var steps = document.createElement("div"); steps.className = "steps block";
@@ -677,7 +758,18 @@
         var tool = document.createElement("div"); tool.className = "step-tool"; tool.textContent = "🔧 " + s.tool;
         var a = document.createElement("pre"); a.className = "step-args"; a.textContent = s.args;
         var r = document.createElement("pre"); r.className = "step-result"; r.textContent = s.result;
-        st.appendChild(tool); st.appendChild(a); st.appendChild(r); body.appendChild(st);
+        st.appendChild(tool); st.appendChild(a); st.appendChild(r);
+        // 历史回放同样不截断：结果较长时提供"展开全部"（按文本量判断，隐藏态测高不可靠）。
+        var resultText = s.result || "";
+        if (resultText.length > 600 || resultText.split("\n").length > 12) {
+          var more = document.createElement("span"); more.className = "step-more"; more.textContent = "展开全部 ▾";
+          more.onclick = function () {
+            var open = r.classList.toggle("expanded");
+            more.textContent = open ? "收起 ▴" : "展开全部 ▾";
+          };
+          st.appendChild(more);
+        }
+        body.appendChild(st);
       });
       btn.onclick = function () {
         var vis = body.style.display !== "none";
@@ -700,7 +792,7 @@
   }
   function addTyping() {
     var row = document.createElement("div"); row.className = "row assistant"; row.id = "typing";
-    row.innerHTML = '<div class="avatar">AI</div><div class="bubble"><span class="typing"><i></i><i></i><i></i></span></div>';
+    row.innerHTML = '<div class="avatar">AI</div><div class="bubble"><span class="typing"><span class="dots"><i></i><i></i><i></i></span><span class="thinking-text">思考中…</span></span></div>';
     chatEl.appendChild(row); scrollBottom();
   }
   function removeTyping() { var t = document.getElementById("typing"); if (t) t.remove(); }
@@ -714,38 +806,89 @@
   }
 
   var loading = false;
+  var controller = null;
+  var pendingStep = null;   // 当前"调用中"的步骤卡片（step_start 创建，step 完成时更新）
   function send(text) {
     var q = (text != null ? text : inputEl.value).trim();
-    if (!q || loading) return;
+    if (!q) return;
+    if (loading) { stopGen(); return; }   // 生成中再次点击 = 停止
     if (!token) { showAuth(true); return; }
     inputEl.value = ""; autoGrow();
     samplesEl.style.display = "none";
     addUser(q);
-    loading = true; sendBtn.disabled = true; addTyping();
+    loading = true; sendBtn.textContent = "停止"; sendBtn.classList.add("stop"); addTyping();
+    controller = new AbortController();
 
     var body = { question: q };
     if (currentConv) body.conversation_id = currentConv;
     if (settings.model) body.model = settings.model;
     if (settings.temperature > 0) body.temperature = settings.temperature;
     if (settings.max_tokens > 0) body.max_tokens = settings.max_tokens;
+    if (settings.enableChart === false) body.enable_chart = false; // 关闭图表输出时显式告知后端
 
     // 流式请求：边处理边渲染，避免长任务下页面假死、回答被截断。
     fetch("/api/ask", {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token, "Accept": "text/event-stream" },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      signal: controller ? controller.signal : undefined
     }).then(function (r) {
       if (!r.ok) {
         return r.json().then(function (e) { throw new Error(e.error || ("HTTP " + r.status)); }).catch(function () { throw new Error("HTTP " + r.status); });
       }
-      removeTyping();
+      // 注意：不在此处移除"思考中"，此时后端可能仍在思考、尚未产出任何事件。
+      // 改为在第一个真实内容事件（step / answer_delta / answer）到达时才移除，避免出现"像卡死"的空窗期。
       var reader = r.body.getReader();
       var decoder = new TextDecoder("utf-8");
       var buf = "";
-      var answerRow = null;        // 最终回答所在的 row（首次 answer 事件时创建）
-      var stepsBody = null;        // 分析过程折叠区
+      var msgRow = null;        // 当前助手消息容器（分析过程 + 回答同属一条）
+      var msgBubble = null;     // 消息气泡（步骤插入到回答之前）
+      var mdEl = null;          // 回答区 .md
+      var stepsBody = null;     // 分析过程折叠区
+      var stepsBtn = null;      // 分析过程折叠按钮
       var stepsCount = 0;
       var convId = null;
+      pendingStep = null;       // 每次新请求重置"调用中"卡片
+      var mdText = "";          // 当前回答累计文本（流式增量渲染用）
+      var renderPending = false;
+
+      function ensureMsg() {
+        if (msgRow) return;
+        msgRow = document.createElement("div"); msgRow.className = "row assistant";
+        var av = document.createElement("div"); av.className = "avatar"; av.textContent = "AI";
+        msgBubble = document.createElement("div"); msgBubble.className = "bubble";
+        mdEl = document.createElement("div"); mdEl.className = "md";
+        msgBubble.appendChild(mdEl);
+        msgRow.appendChild(av); msgRow.appendChild(msgBubble);
+        chatEl.appendChild(msgRow); scrollIfNearBottom();
+      }
+      function ensureSteps() {
+        if (stepsBody) return;
+        ensureMsg();
+        var steps = document.createElement("div"); steps.className = "steps block";
+        stepsBtn = document.createElement("button"); stepsBtn.className = "steps-toggle";
+        stepsBtn.textContent = "查看分析过程";
+        stepsBody = document.createElement("div"); stepsBody.className = "steps-body";
+        stepsBody.style.display = settings.showSteps ? "flex" : "none";
+        stepsBtn.onclick = function () {
+          var vis = stepsBody.style.display !== "none";
+          stepsBody.style.display = vis ? "none" : "flex";
+          stepsBtn.textContent = (vis ? "查看" : "收起") + "分析过程（" + stepsCount + " 步）";
+        };
+        steps.appendChild(stepsBtn); steps.appendChild(stepsBody);
+        msgBubble.insertBefore(steps, mdEl); // 步骤置于回答之上
+      }
+
+      // 增量渲染：合并同一帧内的多个 token，避免高频重排；实时把累计文本渲染为 Markdown。
+      function scheduleRender() {
+        if (renderPending) return;
+        renderPending = true;
+        requestAnimationFrame(function () {
+          renderPending = false;
+          if (mdEl) { mdEl.innerHTML = renderMarkdown(mdText); addCopyButtons(mdEl); }
+          scrollIfNearBottom();
+        });
+      }
 
       function parseFrames() {
         var idx;
@@ -758,57 +901,89 @@
           if (ev.kind === "meta") {
             convId = ev.conversation_id;
             if (convId && convId !== currentConv) { currentConv = convId; loadConversations(); }
-          } else if (ev.kind === "step") {
-            if (!stepsBody) {
-              // 首次出现步骤时，创建"分析过程"折叠区
-              var row = document.createElement("div"); row.className = "row assistant";
-              var av = document.createElement("div"); av.className = "avatar"; av.textContent = "AI";
-              var bubble = document.createElement("div"); bubble.className = "bubble";
-              var steps = document.createElement("div"); steps.className = "steps block";
-              var btn = document.createElement("button"); btn.className = "steps-toggle";
-              var show = settings.showSteps;
-              btn.textContent = "查看分析过程";
-              stepsBody = document.createElement("div"); stepsBody.className = "steps-body";
-              stepsBody.style.display = show ? "flex" : "none";
-              btn.onclick = function () {
-                var vis = stepsBody.style.display !== "none";
-                stepsBody.style.display = vis ? "none" : "flex";
-                btn.textContent = (vis ? "查看" : "收起") + "分析过程（" + stepsCount + " 步）";
-              };
-              steps.appendChild(btn); steps.appendChild(stepsBody);
-              bubble.appendChild(steps); row.appendChild(av); row.appendChild(bubble);
-              chatEl.appendChild(row); scrollBottom();
-            }
+          } else if (ev.kind === "step_start") {
+            // 工具调用开始：展示"调用中"卡片（含 spinner），持续显示直到对应 step 完成，避免执行期间像卡死。
+            removeTyping();   // 首个真实事件到达，移除"思考中"
+            ensureSteps();
             stepsCount++;
-            var st = document.createElement("div"); st.className = "step";
+            var ps = document.createElement("div"); ps.className = "step pending";
+            var pt = document.createElement("div"); pt.className = "step-tool";
+            pt.innerHTML = '<span class="spin"></span>🔧 ' + (ev.step.tool || "");
+            var pw = document.createElement("div"); pw.className = "step-wait"; pw.textContent = "调用中…";
+            ps.appendChild(pt); ps.appendChild(pw);
+            ps._wait = pw; // 供 step_progress 实时更新进度文本
+            // 参数先行展示（流式：调用一发起就能看到入参），结果到达后原地补齐。
+            if (ev.step && ev.step.args) {
+              var pa = document.createElement("pre"); pa.className = "step-args"; pa.textContent = ev.step.args;
+              ps.appendChild(pa);
+            }
+            stepsBody.appendChild(ps);
+            pendingStep = ps;
+            if (stepsBody.style.display === "none") { stepsBody.style.display = "flex"; } // 调用中默认展开，便于看到进度
+            stepsBtn.textContent = (stepsBody.style.display !== "none" ? "收起" : "查看") + "分析过程（" + stepsCount + " 步）";
+            scrollIfNearBottom();
+          } else if (ev.kind === "step_progress") {
+            // 工具执行期间的流式进度（如「已读取 1200 行」/「工具执行中…」），实时刷新"调用中"卡片。
+            if (pendingStep && pendingStep._wait && ev.step && ev.step.progress) {
+              pendingStep._wait.textContent = ev.step.progress;
+              scrollIfNearBottom();
+            }
+          } else if (ev.kind === "step") {
+            removeTyping();   // 首个真实事件到达，移除"思考中"
+            ensureSteps();
+            var st;
+            if (pendingStep) {
+              // 复用"调用中"卡片，原地更新为完成态（去掉 spinner/调用中，填入参数与结果）。
+              st = pendingStep; pendingStep = null;
+              if (st._wait) { st._wait.textContent = ""; st._wait.style.display = "none"; } // 清除"调用中"提示
+            } else {
+              stepsCount++;
+              st = document.createElement("div"); st.className = "step";
+              stepsBody.appendChild(st);
+            }
+            st.className = "step";
+            st.innerHTML = "";
             var tool = document.createElement("div"); tool.className = "step-tool"; tool.textContent = "🔧 " + (ev.step.tool || "");
             var a = document.createElement("pre"); a.className = "step-args"; a.textContent = ev.step.args || "";
+            // 结果不截断：完整展示；过长时限高滚动并提供"展开全部"。
             var rr = document.createElement("pre"); rr.className = "step-result"; rr.textContent = ev.step.result || "";
             st.appendChild(tool); st.appendChild(a); st.appendChild(rr);
-            stepsBody.appendChild(st);
-            var btnEl = stepsBody.previousSibling;
-            if (btnEl) btnEl.textContent = (stepsBody.style.display !== "none" ? "收起" : "查看") + "分析过程（" + stepsCount + " 步）";
-            scrollBottom();
+            (function (resultEl) {
+              // 内容超出限高才提供展开入口，避免短结果出现无意义按钮。
+              if (resultEl.scrollHeight > resultEl.clientHeight + 4) {
+                var more = document.createElement("span"); more.className = "step-more"; more.textContent = "展开全部 ▾";
+                more.onclick = function () {
+                  var open = resultEl.classList.toggle("expanded");
+                  more.textContent = open ? "收起 ▴" : "展开全部 ▾";
+                };
+                st.appendChild(more);
+              }
+            })(rr);
+            stepsBtn.textContent = (stepsBody.style.display !== "none" ? "收起" : "查看") + "分析过程（" + stepsCount + " 步）";
+            scrollIfNearBottom();
+          } else if (ev.kind === "answer_delta") {
+            // 逐字增量：累计文本并实时渲染 Markdown（打字机 + 即时格式化）。
+            removeTyping();
+            ensureMsg();
+            mdEl.classList.add("streaming");
+            mdText += (ev.text || "");
+            scheduleRender();
           } else if (ev.kind === "answer") {
-            if (!answerRow) {
-              answerRow = document.createElement("div"); answerRow.className = "row assistant";
-              var av2 = document.createElement("div"); av2.className = "avatar"; av2.textContent = "AI";
-              var bubble2 = document.createElement("div"); bubble2.className = "bubble";
-              var md = document.createElement("div"); md.className = "md";
-              answerRow._md = md;
-              bubble2.appendChild(md); answerRow.appendChild(av2); answerRow.appendChild(bubble2);
-              chatEl.appendChild(answerRow); scrollBottom();
-            }
-            answerRow._md.innerHTML = renderMarkdown(ev.text || "");
-            scrollBottom();
+            removeTyping();
+            ensureMsg();
+            mdText = ev.text || "";
+            if (mdEl) { mdEl.classList.remove("streaming"); mdEl.innerHTML = renderMarkdown(mdText); addCopyButtons(mdEl); }
+            scrollIfNearBottom();
           } else if (ev.kind === "error") {
+            if (mdEl) mdEl.classList.remove("streaming");
             removeTyping();
             addError(ev.error || "处理出错"); setOnline(false);
           } else if (ev.kind === "done" || ev.kind === "close") {
-            // 完成：若尚未渲染任何回答，补一个占位
-            if (!answerRow && ev.kind === "close") {
-              // close 可能在没有 answer 时到达（极少），忽略
-            }
+            // 完成帧：用累计文本做最终渲染，确保 Markdown 完整（去除流式光标）。
+            removeTyping();   // 兜底：若整轮无任何内容，也不能残留"思考中"
+            if (pendingStep) { pendingStep.remove(); pendingStep = null; stepsCount = Math.max(0, stepsCount - 1); } // 兜底：清理未完成的"调用中"并回退计数
+            if (mdEl) { mdEl.classList.remove("streaming"); mdEl.innerHTML = renderMarkdown(mdText); addCopyButtons(mdEl); }
+            scrollIfNearBottom();
           }
         }
       }
@@ -826,11 +1001,26 @@
       }
       return loop();
     }).then(function () {
-      loading = false; sendBtn.disabled = false;
+      finishSend();
     }).catch(function (e) {
+      if (e && e.name === "AbortError") { finishSend(); return; } // 用户主动停止，保留已输出内容
       removeTyping(); addError(e.message || "请求失败"); setOnline(false);
-      loading = false; sendBtn.disabled = false;
+      finishSend();
     });
+  }
+
+  function stopGen() {
+    if (controller) { controller.abort(); controller = null; }
+  }
+  function finishSend() {
+    loading = false;
+    controller = null;
+    removeTyping();   // 兜底：流结束后无论如何都不残留"思考中"
+    if (pendingStep) { pendingStep.remove(); pendingStep = null; } // 兜底：清理可能残留的"调用中"
+    sendBtn.textContent = "发送";
+    sendBtn.classList.remove("stop");
+    var last = chatEl.querySelector(".row.assistant:last-child .md.streaming");
+    if (last) last.classList.remove("streaming");
   }
 
   sendBtn.onclick = function () { send(); };
@@ -849,6 +1039,7 @@
   var elTempVal = document.getElementById("setTempVal");
   var elMax = document.getElementById("setMax");
   var elSteps = document.getElementById("setSteps");
+  var elChart = document.getElementById("setChart");
   var elTheme = document.getElementById("setTheme");
   var elAuto = document.getElementById("setAuto");
 
@@ -858,6 +1049,7 @@
     elTempVal.textContent = (settings.temperature || 0).toFixed(2);
     elMax.value = settings.max_tokens || 0;
     elSteps.checked = !!settings.showSteps;
+    elChart.checked = settings.enableChart !== false;
     elTheme.value = settings.theme || "auto";
     elAuto.checked = settings.auto !== false;
   }
@@ -871,12 +1063,13 @@
     settings.temperature = parseFloat(elTemp.value) || 0;
     settings.max_tokens = parseInt(elMax.value, 10) || 0;
     settings.showSteps = elSteps.checked;
+    settings.enableChart = elChart.checked;
     settings.theme = elTheme.value || "auto";
     settings.auto = elAuto.checked;
     saveSettings(); applyTheme(); closeDrawer();
   };
   document.getElementById("resetSettings").onclick = function () {
-    settings = { model: "", temperature: 0, max_tokens: 0, showSteps: false, theme: "auto", auto: true };
+    settings = { model: "", temperature: 0, max_tokens: 0, showSteps: false, enableChart: true, theme: "auto", auto: true };
     saveSettings(); syncSettingsToUI(); applyTheme();
   };
   elTemp.oninput = function () { elTempVal.textContent = parseFloat(elTemp.value).toFixed(2); };

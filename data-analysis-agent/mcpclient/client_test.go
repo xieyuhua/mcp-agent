@@ -32,7 +32,7 @@ func TestHandshake(t *testing.T) {
 	loginText, isErr, err := c.CallTool("auth_login", map[string]interface{}{
 		"username": "admin",
 		"password": "admin123",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("auth_login: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestHandshake(t *testing.T) {
 	descText, isErr, err := c.CallTool("describe_table", map[string]interface{}{
 		"token": login.Token,
 		"table": "orders",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("describe_table: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestHandshake(t *testing.T) {
 	sqlText, isErr, err := c.CallTool("run_sql", map[string]interface{}{
 		"token": login.Token,
 		"sql":   "SELECT status, COUNT(*) AS cnt, SUM(amount) AS total FROM orders GROUP BY status",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("run_sql: %v", err)
 	}

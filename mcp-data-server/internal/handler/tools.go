@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
+	"company.com/mcp-data-server/internal/service"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -37,7 +38,7 @@ func RegisterTools(s *server.MCPServer, h *ToolHandler) {
 			mcp.WithNumber("offset", mcp.Description("偏移")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			return toolResult(h.queryTable(ctx, req.GetArguments())), nil
+			return toolResult(h.queryTable(ctx, req.GetArguments(), makeProgressSender(s, ctx))), nil
 		},
 	)
 
@@ -48,7 +49,7 @@ func RegisterTools(s *server.MCPServer, h *ToolHandler) {
 			mcp.WithString("sql", mcp.Required(), mcp.Description("SELECT 语句")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			return toolResult(h.runSQL(ctx, req.GetArguments())), nil
+			return toolResult(h.runSQL(ctx, req.GetArguments(), makeProgressSender(s, ctx))), nil
 		},
 	)
 
@@ -221,6 +222,31 @@ func RegisterTools(s *server.MCPServer, h *ToolHandler) {
 			return toolResult(h.readDirTree(req.GetArguments())), nil
 		},
 	)
+
+	// --- 联网查询工具 ---
+	s.AddTool(
+		mcp.NewTool("web_search",
+			mcp.WithDescription("联网搜索（基于 DuckDuckGo，无需 API key）。返回相关网页的标题、链接与摘要，用于获取实时/外部信息。"),
+			mcp.WithString("token", mcp.Required(), mcp.Description("登录令牌")),
+			mcp.WithString("query", mcp.Required(), mcp.Description("搜索关键词，如「2024 年中国 GDP 增速」")),
+			mcp.WithNumber("limit", mcp.Description("返回结果条数，默认5，最大10")),
+		),
+		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return toolResult(h.webSearch(ctx, req.GetArguments(), makeProgressSender(s, ctx))), nil
+		},
+	)
+
+	s.AddTool(
+		mcp.NewTool("web_fetch",
+			mcp.WithDescription("抓取指定网页 URL 并提取正文纯文本（自动去除脚本/样式噪声）。用于读取搜索结果的具体内容、新闻、文档。"),
+			mcp.WithString("token", mcp.Required(), mcp.Description("登录令牌")),
+			mcp.WithString("url", mcp.Required(), mcp.Description("目标网页地址，需以 http:// 或 https:// 开头")),
+			mcp.WithNumber("max_chars", mcp.Description("返回正文最大字符数，默认8000，最大40000")),
+		),
+		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return toolResult(h.webFetch(ctx, req.GetArguments(), makeProgressSender(s, ctx))), nil
+		},
+	)
 }
 
 // toolResult 把业务方法的 (interface{}, error) 转换为 MCP 工具结果。
@@ -234,4 +260,17 @@ func toolResult(v interface{}, err error) *mcp.CallToolResult {
 		return mcp.NewToolResultError("序列化结果失败: " + e.Error())
 	}
 	return mcp.NewToolResultText(string(b))
+}
+
+// makeProgressSender 返回一个 service.ProgressFunc，在工具执行期间把进度转换为
+// MCP notifications/progress 推送给当前客户端，实现「分析过程」流式展示。
+// 任何发送失败都被静默忽略，绝不影响主流程（避免 progress 导致工具报错）。
+func makeProgressSender(s *server.MCPServer, ctx context.Context) service.ProgressFunc {
+	return func(read int, message string) {
+		defer func() { _ = recover() }()
+		_ = s.SendNotificationToClient(ctx, "notifications/progress", map[string]any{
+			"progress": read,
+			"message":  message,
+		})
+	}
 }

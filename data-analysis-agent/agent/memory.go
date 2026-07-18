@@ -28,7 +28,7 @@ type memoryConfig struct {
 	MaxHistory int
 }
 
-// defaultMemoryConfig 默认记忆参数。
+// defaultMemoryConfig 默认记忆参数（兜底，配置缺失时使用）。
 func defaultMemoryConfig() memoryConfig {
 	return memoryConfig{SummaryThreshold: 12, RecentKeep: 6, MaxHistory: 30}
 }

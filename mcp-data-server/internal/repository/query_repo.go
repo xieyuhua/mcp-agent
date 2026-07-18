@@ -1,6 +1,8 @@
 package repository
 
 import (
+	"database/sql"
+
 	"company.com/mcp-data-server/internal/auth"
 	"company.com/mcp-data-server/internal/tenant"
 	"gorm.io/gorm"
@@ -81,4 +83,34 @@ func (r *QueryRepo) RawSQL(sql string) ([]map[string]interface{}, error) {
 		return nil, err
 	}
 	return rows, nil
+}
+
+// QueryRows 与 Query 同语义，但返回底层 *sql.Rows，便于调用方逐行读取并上报进度
+// （实现「分析过程」流式输出，避免大结果集一次性返回时前端长时间无反馈）。
+func (r *QueryRepo) QueryRows(t *tenant.Context, scope auth.DataScope, req QueryRequest) (*sql.Rows, error) {
+	q := r.db.Table(req.Table)
+	q = applyScope(q, t, scope)
+	if len(req.Fields) > 0 {
+		q = q.Select(req.Fields)
+	}
+	for col, val := range req.Filters {
+		q = q.Where(col+" = ?", val)
+	}
+	if req.Order != "" {
+		q = q.Order(req.Order)
+	}
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	q = q.Limit(limit).Offset(req.Offset)
+	return q.Rows()
+}
+
+// RawSQLRows 与 RawSQL 同语义，返回底层 *sql.Rows 以支持逐行流式读取。
+func (r *QueryRepo) RawSQLRows(sql string) (*sql.Rows, error) {
+	return r.db.Raw(sql).Rows()
 }

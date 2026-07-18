@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -8,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"company.com/data-analysis-agent/internal/logger"
 )
 
 // Message 一次对话消息。
@@ -312,12 +315,382 @@ func (c *Client) chatNoTools(messages []Message) (*Response, error) {
 	return &Response{Content: out.Message.Content}, nil
 }
 
+// ChatStream 同 Chat，但开启流式输出：每产生一个文本增量就通过 onToken 回调（不可为 nil），
+// 最终仍返回完整的 Response（含全部内容与工具调用）。用于 Web/CLI 的逐字流式回答。
+// 当 onToken 为 nil 时退化为静默（等价于非流式，但仍逐行读取响应）。
+func (c *Client) ChatStream(messages []Message, tools []Tool, onToken func(string)) (*Response, error) {
+	if onToken == nil {
+		onToken = func(string) {}
+	}
+	if len(tools) == 0 {
+		return c.chatStreamNoTools(messages, onToken)
+	}
+	if c.provider == "openai" {
+		return c.chatStreamOpenAI(messages, tools, onToken)
+	}
+	return c.chatStreamOllama(messages, tools, onToken)
+}
+
+// ---- 流式底层：发起请求并返回响应体（由调用方逐行读取）----
+
+func (c *Client) streamPost(path string, body interface{}) (io.ReadCloser, error) {
+	b, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	logger.Infof("[llm] 流式请求: %s%s 模型=%s", c.baseURL, path, c.model)
+	t0 := time.Now()
+	req, err := http.NewRequest(http.MethodPost, c.baseURL+path, bytes.NewReader(b))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		logger.Errorf("[llm] 流式请求失败: %s%s err=%v", c.baseURL, path, err)
+		return nil, fmt.Errorf("llm stream request (%s%s): %w", c.baseURL, path, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		logger.Errorf("[llm] 流式请求 HTTP %d: %s%s", resp.StatusCode, c.baseURL, path)
+		return nil, fmt.Errorf("llm http %d: %s", resp.StatusCode, string(data))
+	}
+	logger.Infof("[llm] 流式请求已建立连接: %s%s 耗时=%s", c.baseURL, path, time.Since(t0))
+	return resp.Body, nil
+}
+
+// forEachSSELine 按行读取 SSE 流，对每条 data: 负载调用 fn；遇到 [DONE] 正常结束。
+func forEachSSELine(body io.Reader, fn func(data string) error) error {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "[DONE]" {
+			return nil
+		}
+		if err := fn(data); err != nil {
+			return err
+		}
+	}
+	return scanner.Err()
+}
+
+// forEachNDJSONLine 按行读取 NDJSON 流（Ollama 流式格式），对每行调用 fn。
+func forEachNDJSONLine(body io.Reader, fn func(line string) error) error {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		if err := fn(line); err != nil {
+			return err
+		}
+	}
+	return scanner.Err()
+}
+
+// ---- Ollama 流式 ----
+
+func (c *Client) chatStreamOllama(messages []Message, tools []Tool, onToken func(string)) (*Response, error) {
+	options := map[string]interface{}{"temperature": c.temperature}
+	if c.maxTokens > 0 {
+		options["num_predict"] = c.maxTokens
+	}
+	reqBody := map[string]interface{}{
+		"model":    c.model,
+		"messages": toOllamaMessages(messages),
+		"stream":   true,
+		"tools":    toOllamaTools(tools),
+		"options":  options,
+	}
+	body, err := c.streamPost("/api/chat", reqBody)
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+
+	var content strings.Builder
+	var toolCalls []ToolCall
+	e := forEachNDJSONLine(body, func(line string) error {
+		var chunk struct {
+			Message struct {
+				Content   string `json:"content"`
+				ToolCalls []struct {
+					Function struct {
+						Name      string          `json:"name"`
+						Arguments json.RawMessage `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(line), &chunk); err != nil {
+			return nil // 跳过无法解析的脏行
+		}
+		if chunk.Message.Content != "" {
+			content.WriteString(chunk.Message.Content)
+			onToken(chunk.Message.Content)
+		}
+		for _, tc := range chunk.Message.ToolCalls {
+			args := "{}"
+			if len(tc.Function.Arguments) > 0 {
+				args = string(tc.Function.Arguments)
+			}
+			toolCalls = append(toolCalls, ToolCall{Name: tc.Function.Name, Arguments: args})
+		}
+		return nil
+	})
+	if e != nil {
+		return nil, fmt.Errorf("llm stream read: %w", e)
+	}
+	return &Response{Content: content.String(), ToolCalls: toolCalls}, nil
+}
+
+// ---- OpenAI 兼容流式 ----
+
+type openAIToolAcc struct {
+	ID   string
+	Name string
+	Args strings.Builder
+}
+
+// mergeOpenAIToolCall 按 index 合并分片到达的 tool_calls（arguments 可能被拆成多块）。
+func mergeOpenAIToolCall(acc *[]openAIToolAcc, index int, id, name, args string) {
+	for i := len(*acc); i <= index; i++ {
+		*acc = append(*acc, openAIToolAcc{})
+	}
+	a := &(*acc)[index]
+	if id != "" {
+		a.ID = id
+	}
+	if name != "" {
+		a.Name = name
+	}
+	if args != "" {
+		a.Args.WriteString(args)
+	}
+}
+
+func (c *Client) chatStreamOpenAI(messages []Message, tools []Tool, onToken func(string)) (*Response, error) {
+	msgs := make([]map[string]interface{}, 0, len(messages))
+	for _, m := range messages {
+		msg := map[string]interface{}{"role": m.Role, "content": m.Content}
+		if m.Role == "tool" {
+			if m.ToolCallID != "" {
+				msg["tool_call_id"] = m.ToolCallID
+			}
+			if m.Name != "" {
+				msg["name"] = m.Name
+			}
+		}
+		if len(m.ToolCalls) > 0 {
+			calls := make([]map[string]interface{}, 0, len(m.ToolCalls))
+			for _, tc := range m.ToolCalls {
+				args := tc.Arguments
+				if args == "" {
+					args = "{}"
+				}
+				calls = append(calls, map[string]interface{}{
+					"id":   tc.ID,
+					"type": "function",
+					"function": map[string]interface{}{
+						"name":      tc.Name,
+						"arguments": args,
+					},
+				})
+			}
+			msg["tool_calls"] = calls
+		}
+		msgs = append(msgs, msg)
+	}
+	toolDefs := make([]map[string]interface{}, 0, len(tools))
+	for _, t := range tools {
+		toolDefs = append(toolDefs, map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        t.Name,
+				"description": t.Description,
+				"parameters":  t.Parameters,
+			},
+		})
+	}
+
+	reqBody := map[string]interface{}{
+		"model":       c.model,
+		"messages":    msgs,
+		"temperature": c.temperature,
+		"tools":       toolDefs,
+		"stream":      true,
+	}
+	if c.maxTokens > 0 {
+		reqBody["max_tokens"] = c.maxTokens
+	}
+	body, err := c.streamPost("/v1/chat/completions", reqBody)
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+
+	var content strings.Builder
+	var tcAcc []openAIToolAcc
+	e := forEachSSELine(body, func(data string) error {
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content   string `json:"content"`
+					ToolCalls []struct {
+						Index    int    `json:"index"`
+						ID       string `json:"id"`
+						Function struct {
+							Name      string `json:"name"`
+							Arguments string `json:"arguments"`
+						} `json:"function"`
+					} `json:"tool_calls"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			return nil
+		}
+		if len(chunk.Choices) == 0 {
+			return nil
+		}
+		d := chunk.Choices[0].Delta
+		if d.Content != "" {
+			content.WriteString(d.Content)
+			onToken(d.Content)
+		}
+		for _, tc := range d.ToolCalls {
+			mergeOpenAIToolCall(&tcAcc, tc.Index, tc.ID, tc.Function.Name, tc.Function.Arguments)
+		}
+		return nil
+	})
+	if e != nil {
+		return nil, fmt.Errorf("llm stream read: %w", e)
+	}
+	resp := &Response{Content: content.String()}
+	for _, acc := range tcAcc {
+		args := acc.Args.String()
+		if args == "" {
+			args = "{}"
+		}
+		resp.ToolCalls = append(resp.ToolCalls, ToolCall{ID: acc.ID, Name: acc.Name, Arguments: args})
+	}
+	return resp, nil
+}
+
+// ---- 无工具流式（纯对话）----
+
+func (c *Client) chatStreamNoTools(messages []Message, onToken func(string)) (*Response, error) {
+	if c.provider == "openai" {
+		return c.chatStreamNoToolsOpenAI(messages, onToken)
+	}
+	return c.chatStreamNoToolsOllama(messages, onToken)
+}
+
+func (c *Client) chatStreamNoToolsOllama(messages []Message, onToken func(string)) (*Response, error) {
+	options := map[string]interface{}{"temperature": c.temperature}
+	if c.maxTokens > 0 {
+		options["num_predict"] = c.maxTokens
+	}
+	reqBody := map[string]interface{}{
+		"model":    c.model,
+		"messages": toOllamaMessages(messages),
+		"stream":   true,
+		"options":  options,
+	}
+	body, err := c.streamPost("/api/chat", reqBody)
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+
+	var content strings.Builder
+	e := forEachNDJSONLine(body, func(line string) error {
+		var chunk struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(line), &chunk); err != nil {
+			return nil
+		}
+		if chunk.Message.Content != "" {
+			content.WriteString(chunk.Message.Content)
+			onToken(chunk.Message.Content)
+		}
+		return nil
+	})
+	if e != nil {
+		return nil, fmt.Errorf("llm stream read: %w", e)
+	}
+	return &Response{Content: content.String()}, nil
+}
+
+func (c *Client) chatStreamNoToolsOpenAI(messages []Message, onToken func(string)) (*Response, error) {
+	msgs := make([]map[string]interface{}, 0, len(messages))
+	for _, m := range messages {
+		msgs = append(msgs, map[string]interface{}{"role": m.Role, "content": m.Content})
+	}
+	reqBody := map[string]interface{}{
+		"model":       c.model,
+		"messages":    msgs,
+		"temperature": c.temperature,
+		"stream":      true,
+	}
+	if c.maxTokens > 0 {
+		reqBody["max_tokens"] = c.maxTokens
+	}
+	body, err := c.streamPost("/v1/chat/completions", reqBody)
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+
+	var content strings.Builder
+	e := forEachSSELine(body, func(data string) error {
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			return nil
+		}
+		if len(chunk.Choices) == 0 {
+			return nil
+		}
+		if chunk.Choices[0].Delta.Content != "" {
+			content.WriteString(chunk.Choices[0].Delta.Content)
+			onToken(chunk.Choices[0].Delta.Content)
+		}
+		return nil
+	})
+	if e != nil {
+		return nil, fmt.Errorf("llm stream read: %w", e)
+	}
+	return &Response{Content: content.String()}, nil
+}
+
 // post 发送 HTTP 请求并解析 JSON。
 func (c *Client) post(path string, body interface{}, out interface{}) error {
 	b, err := json.Marshal(body)
 	if err != nil {
 		return err
 	}
+	logger.Infof("[llm] 请求: %s%s 模型=%s", c.baseURL, path, c.model)
+	t0 := time.Now()
 	req, err := http.NewRequest(http.MethodPost, c.baseURL+path, bytes.NewReader(b))
 	if err != nil {
 		return err
@@ -328,6 +701,7 @@ func (c *Client) post(path string, body interface{}, out interface{}) error {
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
+		logger.Errorf("[llm] 请求失败: %s%s err=%v", c.baseURL, path, err)
 		return fmt.Errorf("llm request (%s%s): %w", c.baseURL, path, err)
 	}
 	defer resp.Body.Close()
@@ -336,8 +710,10 @@ func (c *Client) post(path string, body interface{}, out interface{}) error {
 		return err
 	}
 	if resp.StatusCode != http.StatusOK {
+		logger.Errorf("[llm] 请求 HTTP %d: %s%s", resp.StatusCode, c.baseURL, path)
 		return fmt.Errorf("llm http %d: %s", resp.StatusCode, string(data))
 	}
+	logger.Infof("[llm] 请求完成: %s%s 耗时=%s", c.baseURL, path, time.Since(t0))
 	if err := json.Unmarshal(data, out); err != nil {
 		return fmt.Errorf("llm decode: %w (body: %s)", err, string(data))
 	}

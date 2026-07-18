@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+
+	"company.com/data-analysis-agent/internal/logger"
 )
 
 // ToolMeta MCP 工具元信息（tools/list 返回）。
@@ -23,7 +25,7 @@ type Transport interface {
 	// Initialize 完成握手：initialize + initialized 通知 + tools/list。
 	Initialize() error
 	Notify(method string, params interface{}) error
-	Call(method string, params interface{}, out interface{}) error
+	Call(method string, params interface{}, out interface{}, onProgress func(message string)) error
 	Close() error
 	// Tools 返回已发现的工具清单（Initialize 之后可用）。
 	Tools() []ToolMeta
@@ -48,7 +50,9 @@ func (c *Client) HasTool(name string) bool {
 }
 
 // CallTool 调用一个 MCP 工具，返回文本结果；isError 指示工具执行是否报错。
-func (c *Client) CallTool(name string, args map[string]interface{}) (text string, isError bool, err error) {
+// onProgress 非 nil 时，工具执行期间的进度通知（notifications/progress）会经其回调（如已读取行数）。
+func (c *Client) CallTool(name string, args map[string]interface{}, onProgress func(message string)) (text string, isError bool, err error) {
+	logger.Infof("[mcp] 请求工具调用: %s 参数=%s", name, logger.Sanitize(fmt.Sprintf("%v", args)))
 	var out struct {
 		Content []struct {
 			Type string `json:"type"`
@@ -59,7 +63,7 @@ func (c *Client) CallTool(name string, args map[string]interface{}) (text string
 	if err := c.t.Call("tools/call", map[string]interface{}{
 		"name":      name,
 		"arguments": args,
-	}, &out); err != nil {
+	}, &out, onProgress); err != nil {
 		return "", false, err
 	}
 	var sb string
@@ -67,6 +71,13 @@ func (c *Client) CallTool(name string, args map[string]interface{}) (text string
 		if c0.Type == "text" {
 			sb += c0.Text
 		}
+	}
+	if err != nil {
+		logger.Errorf("[mcp] 工具调用失败: %s err=%v", name, err)
+	} else if out.IsError {
+		logger.Warnf("[mcp] 工具返回错误: %s isError=true", name)
+	} else {
+		logger.Infof("[mcp] 工具调用完成: %s 返回长度=%d", name, len(sb))
 	}
 	return sb, out.IsError, nil
 }
@@ -87,13 +98,14 @@ type stdioTransport struct {
 
 // StartConfig 启动本地子进程所需参数。
 type StartConfig struct {
-	ServerPath  string
-	DBDialect   string
-	DBDsn       string
-	Env         map[string]string
-	MaskEnabled bool
-	SeedDemo    bool
-	WorkDir     string
+	ServerPath     string
+	DBDialect      string
+	DBDsn          string
+	Env            map[string]string
+	MaskEnabled    bool
+	SeedDemo       bool
+	WorkDir        string
+	SandboxEnabled bool
 }
 
 // Start 拉起本地 MCP 子进程（内置 mcp-data-server）并完成握手。
@@ -133,6 +145,11 @@ func Start(cfg StartConfig) (*Client, error) {
 		put("SEED_DEMO", "false")
 	}
 	put("WORK_DIR", cfg.WorkDir)
+	if cfg.SandboxEnabled {
+		put("SANDBOX_ENABLED", "true")
+	} else {
+		put("SANDBOX_ENABLED", "false")
+	}
 	cmd.Env = env
 
 	stdin, err := cmd.StdinPipe()
@@ -166,7 +183,7 @@ func (t *stdioTransport) Initialize() error {
 		"protocolVersion": "2024-11-05",
 		"capabilities":    map[string]interface{}{},
 		"clientInfo":      map[string]interface{}{"name": "data-analysis-agent", "version": "1.0.0"},
-	}, nil); err != nil {
+	}, nil, nil); err != nil {
 		return fmt.Errorf("initialize: %w", err)
 	}
 	if err := t.Notify("notifications/initialized", map[string]interface{}{}); err != nil {
@@ -175,7 +192,7 @@ func (t *stdioTransport) Initialize() error {
 	var list struct {
 		Tools []ToolMeta `json:"tools"`
 	}
-	if err := t.Call("tools/list", map[string]interface{}{}, &list); err != nil {
+	if err := t.Call("tools/list", map[string]interface{}{}, &list, nil); err != nil {
 		return fmt.Errorf("tools/list: %w", err)
 	}
 	t.tools = list.Tools
@@ -200,7 +217,7 @@ func (t *stdioTransport) Notify(method string, params interface{}) error {
 	return err
 }
 
-func (t *stdioTransport) Call(method string, params interface{}, out interface{}) error {
+func (t *stdioTransport) Call(method string, params interface{}, out interface{}, onProgress func(message string)) error {
 	t.mu.Lock()
 	t.nextID++
 	id := t.nextID
@@ -225,23 +242,36 @@ func (t *stdioTransport) Call(method string, params interface{}, out interface{}
 		if len(line) > 0 {
 			var resp struct {
 				ID     json.RawMessage `json:"id"`
+				Method string          `json:"method"`
+				Params struct {
+					Message string `json:"message"`
+				} `json:"params"`
 				Result json.RawMessage `json:"result"`
 				Error  *struct {
 					Message string `json:"message"`
 				} `json:"error"`
 			}
-			if jerr := json.Unmarshal(line, &resp); jerr == nil && resp.ID != nil {
-				var got int
-				if uerr := json.Unmarshal(resp.ID, &got); uerr == nil && got == id {
-					if resp.Error != nil {
-						return fmt.Errorf("rpc error: %s", resp.Error.Message)
+			if jerr := json.Unmarshal(line, &resp); jerr == nil {
+				// 进度通知：实时回调，不中断读取
+				if resp.Method == "notifications/progress" {
+					if onProgress != nil && resp.Params.Message != "" {
+						onProgress(resp.Params.Message)
 					}
-					if out != nil && len(resp.Result) > 0 {
-						if merr := json.Unmarshal(resp.Result, out); merr != nil {
-							return fmt.Errorf("decode result: %w", merr)
+					continue
+				}
+				if resp.ID != nil {
+					var got int
+					if uerr := json.Unmarshal(resp.ID, &got); uerr == nil && got == id {
+						if resp.Error != nil {
+							return fmt.Errorf("rpc error: %s", resp.Error.Message)
 						}
+						if out != nil && len(resp.Result) > 0 {
+							if merr := json.Unmarshal(resp.Result, out); merr != nil {
+								return fmt.Errorf("decode result: %w", merr)
+							}
+						}
+						return nil
 					}
-					return nil
 				}
 			}
 		}

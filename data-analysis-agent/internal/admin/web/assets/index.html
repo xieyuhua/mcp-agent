@@ -112,6 +112,10 @@ const SCHEMA = [
     desc: "sqlite: ./data.db ｜ mysql: user:pass@tcp(127.0.0.1:3306)/db?..." },
   { group: "MCP 对接（本地）", key: "mcp.mask_enabled", label: "启用脱敏", type: "checkbox" },
   { group: "MCP 对接（本地）", key: "mcp.seed_demo", label: "写入演示数据", type: "checkbox" },
+  { group: "MCP 对接（本地）", key: "mcp.sandbox_enabled", label: "启用工作目录沙箱", type: "checkbox",
+    desc: "开启：文件工具只能访问 work_dir 内（默认，安全）；关闭：系统环境模式，可访问服务器任意绝对路径（仅受信任内网用，谨慎）" },
+  { group: "MCP 对接（本地）", key: "mcp.work_dir", label: "工作目录", type: "text",
+    desc: "文件工具根目录（沙箱模式下限定在此；留空=进程工作目录）" },
   { group: "MCP 对接（本地）", key: "mcp.username", label: "登录账号", type: "text" },
   { group: "MCP 对接（本地）", key: "mcp.password", label: "登录密码", type: "password" },
 
@@ -124,6 +128,17 @@ const SCHEMA = [
   { group: "Agent 编排", key: "agent.max_steps", label: "最大推理步数", type: "number" },
   { group: "Agent 编排", key: "agent.use_native_tools", label: "原生工具调用", type: "checkbox" },
   { group: "Agent 编排", key: "agent.max_result_rows", label: "结果最大行数", type: "number" },
+  { group: "Agent 编排", key: "agent.memory_max_history", label: "上下文窗口（历史条数）", type: "number",
+    desc: "单次最多回放的历史消息条数，超出仅取最近部分。默认 30" },
+  { group: "Agent 编排", key: "agent.memory_summary_threshold", label: "摘要压缩阈值", type: "number",
+    desc: "历史消息数达到该值时，对早期消息做摘要压缩。默认 12" },
+  { group: "Agent 编排", key: "agent.memory_recent_keep", label: "摘要保留最近条数", type: "number",
+    desc: "摘要压缩时保留最近 N 条原文，其余早期消息被压缩为摘要。默认 6" },
+
+  { group: "运行日志", key: "log.save_to_file", label: "保存日志到文件", type: "checkbox",
+    desc: "开启后把每个环节（HTTP/LLM/MCP/工具）的请求日志带时间戳写入 ./logs/agent-YYYY-MM-DD.log" },
+  { group: "运行日志", key: "log.dir", label: "日志目录", type: "text",
+    desc: "日志文件存放目录，默认 logs" },
 
   { group: "系统提示词（内置场景）", key: "prompts.builtin", label: "内置数据库分析", type: "textarea", full: true },
   { group: "系统提示词（远程场景）", key: "prompts.remote", label: "远程 MCP 场景", type: "textarea", full: true },

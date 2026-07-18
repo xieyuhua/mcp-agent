@@ -21,18 +21,25 @@ type Config struct {
 	WebDir string `json:"web_dir"`
 
 	// WorkDir 文件/目录读写工具的根目录（沙箱）。为空时默认进程工作目录。
-	// 所有文件工具都只能在该目录及其子目录内操作，禁止越界访问。
+	// 所有文件工具都只能在该目录及其子目录内操作，禁止越界访问（当 SandboxEnabled=true 时）。
 	WorkDir string `json:"work_dir"`
+
+	// SandboxEnabled 是否启用工作目录沙箱（默认 true）。
+	// true：所有文件工具只能访问 WorkDir 及其子目录，拦截 ../ 越界。
+	// false：进入“系统环境”模式，允许访问任意绝对路径（相对路径相对进程工作目录），
+	// 适用于受信任的内网部署，但请谨慎——文件工具将能读写服务器上的任意文件。
+	SandboxEnabled bool `json:"sandbox_enabled"`
 }
 
 // Load 加载配置：先读文件，再用环境变量覆盖。
 func Load(path string) (*Config, error) {
 	c := &Config{
-		DBDialect:   "sqlite",
-		DBDSN:       "./data.db",
-		JWTSecret:   "change-me-in-production",
-		MaskEnabled: true,
-		SeedDemo:    true,
+		DBDialect:     "sqlite",
+		DBDSN:         "./data.db",
+		JWTSecret:     "change-me-in-production",
+		MaskEnabled:   true,
+		SeedDemo:      true,
+		SandboxEnabled: true, // 默认启用沙箱，文件工具只能访问 WorkDir 内
 	}
 	if path == "" {
 		path = os.Getenv("CONFIG_FILE")
@@ -72,6 +79,9 @@ func Load(path string) (*Config, error) {
 	}
 	if v := os.Getenv("WORK_DIR"); v != "" {
 		c.WorkDir = v
+	}
+	if v := os.Getenv("SANDBOX_ENABLED"); v != "" {
+		c.SandboxEnabled = v == "true" || v == "1" || v == "yes"
 	}
 	return c, nil
 }

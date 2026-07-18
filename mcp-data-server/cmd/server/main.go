@@ -62,8 +62,9 @@ func main() {
 
 	querySvc := service.NewQueryService(queryRepo, auditSvc, authz, masker, cfg.MaskEnabled)
 	permSvc := service.NewPermissionService(permRepo, authz, masker, auditSvc)
+	webSvc := service.NewWebService()
 
-	toolHandler := handler.NewToolHandler(authSvc, querySvc, permSvc, cfg.WorkDir)
+	toolHandler := handler.NewToolHandler(authSvc, querySvc, permSvc, webSvc, cfg.WorkDir, cfg.SandboxEnabled)
 
 	// 用 mcp-go 构建 MCP 服务，并注册全部业务工具。
 	mcpServer := server.NewMCPServer(

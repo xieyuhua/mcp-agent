@@ -20,9 +20,10 @@ type ChartSpec struct {
 
 // StepLog 一次工具调用的执行痕迹，便于前端展示"思考过程"。
 type StepLog struct {
-	Tool   string `json:"tool"`
-	Args   string `json:"args"`
-	Result string `json:"result"`
+	Tool     string `json:"tool"`
+	Args     string `json:"args"`
+	Result   string `json:"result"`
+	Progress string `json:"progress,omitempty"` // 工具执行期间的流式进度提示（如「已读取 1200 行」）
 }
 
 // AskResult 一次提问的结构化结果，供 HTTP 接口返回给前端。

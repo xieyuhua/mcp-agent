@@ -7,11 +7,35 @@ import (
 	"strings"
 )
 
-// resolveWorkPath 把相对路径解析到沙箱内的绝对路径，并校验不越界。
-// 所有文件工具都必须经过它，禁止通过 ../ 等访问工作目录之外。
+// resolveWorkPath 把工具传入的路径解析为最终绝对路径。
+// 沙箱模式（sandbox=true，默认）：路径限定在 WorkDir 内，拦截 ../ 越界，禁止访问沙箱外。
+// 系统模式（sandbox=false）：允许绝对路径直接访问系统任意位置；相对路径相对 WorkDir（或进程工作目录）解析，不做越界拦截。
 func (h *ToolHandler) resolveWorkPath(rel string) (string, error) {
 	rel = filepath.ToSlash(rel)
 	rel = strings.TrimPrefix(rel, "/")
+
+	// 系统模式：允许绝对路径直接访问（受信任内网部署用，请谨慎）。
+	if !h.sandbox {
+		if filepath.IsAbs(rel) {
+			abs, err := filepath.Abs(rel)
+			if err != nil {
+				return "", fmt.Errorf("解析路径失败: %w", err)
+			}
+			return abs, nil
+		}
+		// 相对路径：以 WorkDir（空则进程工作目录）为基准解析。
+		base := h.workDir
+		if base == "" {
+			base = "."
+		}
+		abs, err := filepath.Abs(filepath.Join(base, rel))
+		if err != nil {
+			return "", fmt.Errorf("解析路径失败: %w", err)
+		}
+		return abs, nil
+	}
+
+	// 沙箱模式：强制限制在 WorkDir 内。
 	// 先按段检查，任何显式 .. 都直接拒绝（防逃逸）。
 	for _, seg := range strings.Split(rel, "/") {
 		if seg == ".." {

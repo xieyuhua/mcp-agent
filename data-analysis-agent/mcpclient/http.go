@@ -101,7 +101,7 @@ func (t *httpTransport) Initialize() error {
 		"protocolVersion": "2025-03-26",
 		"capabilities":    map[string]interface{}{},
 		"clientInfo":      map[string]interface{}{"name": "data-analysis-agent", "version": "1.0.0"},
-	}, nil); err != nil {
+	}, nil, nil); err != nil {
 		return fmt.Errorf("initialize: %w", err)
 	}
 	if err := t.Notify("notifications/initialized", map[string]interface{}{}); err != nil {
@@ -110,7 +110,7 @@ func (t *httpTransport) Initialize() error {
 	var list struct {
 		Tools []ToolMeta `json:"tools"`
 	}
-	if err := t.Call("tools/list", map[string]interface{}{}, &list); err != nil {
+	if err := t.Call("tools/list", map[string]interface{}{}, &list, nil); err != nil {
 		return fmt.Errorf("tools/list: %w", err)
 	}
 	t.tools = list.Tools
@@ -121,19 +121,19 @@ func (t *httpTransport) Tools() []ToolMeta { return t.tools }
 
 func (t *httpTransport) Notify(method string, params interface{}) error {
 	req := rpcRequest{JSONRPC: "2.0", Method: method, Params: params}
-	return t.post(req, nil)
+	return t.post(req, nil, nil)
 }
 
-func (t *httpTransport) Call(method string, params interface{}, out interface{}) error {
+func (t *httpTransport) Call(method string, params interface{}, out interface{}, onProgress func(message string)) error {
 	t.mu.Lock()
 	t.nextID++
 	id := t.nextID
 	t.mu.Unlock()
 	req := rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params}
-	return t.post(req, out)
+	return t.post(req, out, onProgress)
 }
 
-func (t *httpTransport) post(req rpcRequest, out interface{}) error {
+func (t *httpTransport) post(req rpcRequest, out interface{}, onProgress func(message string)) error {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return err
@@ -161,7 +161,7 @@ func (t *httpTransport) post(req rpcRequest, out interface{}) error {
 	}
 	ct := resp.Header.Get("Content-Type")
 	if strings.Contains(ct, "text/event-stream") {
-		return readSSEResponse(bufio.NewReader(resp.Body), req.ID, out)
+		return readSSEResponse(bufio.NewReader(resp.Body), req.ID, out, onProgress)
 	}
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -200,7 +200,8 @@ func decodeRPC(data []byte, wantID int, out interface{}) error {
 }
 
 // readSSEResponse 从 SSE 流中读取，直到匹配 wantID 的响应。
-func readSSEResponse(r *bufio.Reader, wantID int, out interface{}) error {
+// 期间若出现 notifications/progress（无 id），则通过 onProgress 回调（进度文本）实时传出，实现流式。
+func readSSEResponse(r *bufio.Reader, wantID int, out interface{}, onProgress func(message string)) error {
 	var dataLines []string
 	flush := func() error {
 		if len(dataLines) == 0 {
@@ -210,6 +211,10 @@ func readSSEResponse(r *bufio.Reader, wantID int, out interface{}) error {
 		dataLines = nil
 		var ev struct {
 			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+			Params struct {
+				Message string `json:"message"`
+			} `json:"params"`
 			Result json.RawMessage `json:"result"`
 			Error  *struct {
 				Message string `json:"message"`
@@ -217,6 +222,13 @@ func readSSEResponse(r *bufio.Reader, wantID int, out interface{}) error {
 		}
 		if err := json.Unmarshal([]byte(raw), &ev); err != nil {
 			return nil // 忽略非 JSON 事件
+		}
+		// 进度通知：实时回调，不中断读取
+		if ev.Method == "notifications/progress" {
+			if onProgress != nil && ev.Params.Message != "" {
+				onProgress(ev.Params.Message)
+			}
+			return nil
 		}
 		if ev.Error != nil {
 			return fmt.Errorf("rpc error: %s", ev.Error.Message)
@@ -270,6 +282,7 @@ type sseTransport struct {
 	nextID   int
 	tools    []ToolMeta
 	pending  map[int]chan sseResult
+	onProgress func(message string) // 当前 Call 的进度回调（Agent 串行调用工具，单槽足够）
 	closed   chan struct{}
 }
 
@@ -328,12 +341,28 @@ func (t *sseTransport) readLoop(rc io.ReadCloser) {
 		default:
 			var ev struct {
 				ID     json.RawMessage `json:"id"`
+				Method string          `json:"method"`
+				Params struct {
+					Message string `json:"message"`
+				} `json:"params"`
 				Result json.RawMessage `json:"result"`
 				Error  *struct {
 					Message string `json:"message"`
 				} `json:"error"`
 			}
 			if json.Unmarshal([]byte(raw), &ev) == nil {
+				// 进度通知：实时回调（不按 id 路由），实现流式。
+				if ev.Method == "notifications/progress" {
+					if ev.Params.Message != "" {
+						t.mu.Lock()
+						cb := t.onProgress
+						t.mu.Unlock()
+						if cb != nil {
+							cb(ev.Params.Message)
+						}
+					}
+					return
+				}
 				if ev.Error != nil {
 					t.deliver(ev.ID, nil, fmt.Errorf("rpc error: %s", ev.Error.Message))
 					return
@@ -388,7 +417,7 @@ func (t *sseTransport) Initialize() error {
 		"protocolVersion": "2024-11-05",
 		"capabilities":    map[string]interface{}{},
 		"clientInfo":      map[string]interface{}{"name": "data-analysis-agent", "version": "1.0.0"},
-	}, nil); err != nil {
+	}, nil, nil); err != nil {
 		return fmt.Errorf("initialize: %w", err)
 	}
 	if err := t.Notify("notifications/initialized", map[string]interface{}{}); err != nil {
@@ -397,7 +426,7 @@ func (t *sseTransport) Initialize() error {
 	var list struct {
 		Tools []ToolMeta `json:"tools"`
 	}
-	if err := t.Call("tools/list", map[string]interface{}{}, &list); err != nil {
+	if err := t.Call("tools/list", map[string]interface{}{}, &list, nil); err != nil {
 		return fmt.Errorf("tools/list: %w", err)
 	}
 	t.tools = list.Tools
@@ -432,7 +461,7 @@ func (t *sseTransport) Notify(method string, params interface{}) error {
 	return nil
 }
 
-func (t *sseTransport) Call(method string, params interface{}, out interface{}) error {
+func (t *sseTransport) Call(method string, params interface{}, out interface{}, onProgress func(message string)) error {
 	if t.endpoint == "" {
 		return fmt.Errorf("sse endpoint 尚未就绪")
 	}
@@ -441,10 +470,12 @@ func (t *sseTransport) Call(method string, params interface{}, out interface{}) 
 	id := t.nextID
 	ch := make(chan sseResult, 1)
 	t.pending[id] = ch
+	t.onProgress = onProgress // 设置当前 Call 的进度回调（串行调用，安全）
 	t.mu.Unlock()
 	defer func() {
 		t.mu.Lock()
 		delete(t.pending, id)
+		t.onProgress = nil
 		t.mu.Unlock()
 	}()
 

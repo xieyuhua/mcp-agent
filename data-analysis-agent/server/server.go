@@ -8,8 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"company.com/data-analysis-agent/agent"
+	"company.com/data-analysis-agent/internal/logger"
 	"company.com/data-analysis-agent/internal/userdb"
 	"company.com/data-analysis-agent/internal/webui"
 )
@@ -67,7 +69,16 @@ func (s *Server) Handler() http.Handler {
 			mux.Handle("/app/", http.StripPrefix("/app/", spaFallback(s.staticDir, fs)))
 		}
 	}
-	return withCORS(mux)
+	return withCORS(loggingMiddleware(mux))
+}
+
+// loggingMiddleware 记录每个 HTTP 请求（方法/路径/耗时），写入运行日志。
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t0 := time.Now()
+		next.ServeHTTP(w, r)
+		logger.Infof("[http] %s %s 耗时=%s 来自=%s", r.Method, r.URL.Path, time.Since(t0), r.RemoteAddr)
+	})
 }
 
 // Run 启动 HTTP 服务。
@@ -88,9 +99,10 @@ type askRequest struct {
 	// ConversationID 多轮会话 ID；为空则自动新建一个会话。
 	ConversationID string `json:"conversation_id"`
 	// 以下为可选的基础设置覆盖项（来自 Web UI）。
-	Model       string  `json:"model"`
+	Model       string `json:"model"`
 	Temperature float64 `json:"temperature"`
 	MaxTokens   int     `json:"max_tokens"`
+	EnableChart *bool  `json:"enable_chart"` // 是否允许生成图表；nil=沿用（开启）
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -126,6 +138,7 @@ func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "question 不能为空"})
 		return
 	}
+	logger.Infof("[http] 收到提问: 用户=%s 会话=%s 问题=%s", user.Username, req.ConversationID, logger.Sanitize(q))
 
 	// 解析/创建会话：会话必须归属当前用户。
 	conv, err := s.resolveConversation(user.ID, req.ConversationID, q)
@@ -135,11 +148,13 @@ func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 读取会话历史作为上下文（多轮记忆），限制最近 N 条避免上下文爆炸。
+	// 历史条数上限从后台配置读取（agent.memory_max_history），不再固定写死。
 	// 历史携带 assistant 的结构化结果（图表/表格/SQL），供记忆层回放。
-	history := s.loadHistory(user.ID, conv.ID, 30)
+	historyLimit := s.ag.MemoryInfo()["max_history"]
+	history := s.loadHistory(user.ID, conv.ID, historyLimit)
 
 	// 组装可选的基础设置覆盖项（空值表示沿用运行配置）。
-	opts := buildAskOpts(req.Model, req.Temperature, req.MaxTokens)
+	opts := buildAskOpts(req.Model, req.Temperature, req.MaxTokens, req.EnableChart)
 
 	// 流式请求（前端带 Accept: text/event-stream）：边处理边推送 SSE 事件，
 	// 避免长任务下前端长时间无响应，且回答不再因等待整轮完成而被"截断"显示。
@@ -158,6 +173,7 @@ func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
 
 	// 持久化本轮问答（user + assistant）。assistant 的富结果存入 extra 供回放。
 	s.persistRound(conv.ID, q, res)
+	logger.Infof("[http] 回答完成: 用户=%s 会话=%s 答案长度=%d 步骤数=%d", user.Username, conv.ID, len(res.Answer), len(res.Steps))
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"conversation_id": conv.ID,
@@ -166,15 +182,20 @@ func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
 }
 
 // buildAskOpts 组装单次提问的可选覆盖项；全空时返回 nil（沿用运行配置）。
-func buildAskOpts(model string, temperature float64, maxTokens int) *agent.AskOptions {
-	if model == "" && temperature <= 0 && maxTokens <= 0 {
+func buildAskOpts(model string, temperature float64, maxTokens int, enableChart *bool) *agent.AskOptions {
+	if model == "" && temperature <= 0 && maxTokens <= 0 && enableChart == nil {
 		return nil
 	}
-	return &agent.AskOptions{
+	opts := &agent.AskOptions{
 		Model:       model,
 		Temperature: temperature,
 		MaxTokens:   maxTokens,
 	}
+	if enableChart != nil {
+		v := *enableChart
+		opts.EnableChart = &v
+	}
+	return opts
 }
 
 // persistRound 持久化一轮问答（user + assistant），assistant 富结果存入 extra 供回放。
@@ -219,8 +240,14 @@ func (s *Server) handleAskStream(w http.ResponseWriter, r *http.Request, user *u
 	var gotErr string
 	streamOpts.OnEvent = func(ev agent.StreamEvent) {
 		switch ev.Kind {
+		case agent.EventStepStart:
+			send(map[string]interface{}{"kind": "step_start", "step": ev.Step})
+		case agent.EventStepProgress:
+			send(map[string]interface{}{"kind": "step_progress", "step": ev.Step})
 		case agent.EventStep:
 			send(map[string]interface{}{"kind": "step", "step": ev.Step})
+		case agent.EventAnswerDelta:
+			send(map[string]interface{}{"kind": "answer_delta", "text": ev.Text})
 		case agent.EventAnswer:
 			send(map[string]interface{}{"kind": "answer", "text": ev.Text})
 		case agent.EventDone:

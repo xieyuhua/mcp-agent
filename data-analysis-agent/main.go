@@ -11,6 +11,7 @@ import (
 	"company.com/data-analysis-agent/config"
 	"company.com/data-analysis-agent/internal/admin"
 	"company.com/data-analysis-agent/internal/confdb"
+	"company.com/data-analysis-agent/internal/logger"
 	"company.com/data-analysis-agent/internal/userdb"
 	"company.com/data-analysis-agent/server"
 )
@@ -49,6 +50,10 @@ func main() {
 		effCfg.LLM.Model = *model
 	}
 
+	// 初始化运行日志：根据配置决定是否把每个环节的请求日志保存到文件（带时间戳）。
+	logger.Init(effCfg.Log.SaveToFile, effCfg.Log.Dir)
+	logger.Infof("[main] 启动数据分析助手 (LLM=%s/%s)", effCfg.LLM.Provider, effCfg.LLM.Model)
+
 	// 命令行基础设置（单次覆盖项）：模型/温度/max_tokens。
 	var cliOpts *agent.AskOptions
 	if *model != "" || *temperature > 0 || *maxTokens > 0 {
@@ -67,6 +72,8 @@ func main() {
 	fmt.Printf("正在启动数据分析助手 (LLM=%s/%s, MCP=%s)\n",
 		effCfg.LLM.Provider, effCfg.LLM.Model, mcpInfo)
 	fmt.Printf("配置数据库: %s（后台管理页面: /admin）\n", store.DBPath())
+	fmt.Printf("日志文件: %s（%s）\n", effCfg.Log.Dir,
+		map[bool]string{true: "已开启保存到文件", false: "仅控制台"}[effCfg.Log.SaveToFile])
 
 	ag, err := agent.New(effCfg)
 	if err != nil {
@@ -129,23 +136,64 @@ func main() {
 	fmt.Println("再见。")
 }
 
-// cliAsk 以流式方式处理一次提问：实时打印工具步骤与最终回答，返回最终文本。
+// cliAsk 以流式方式处理一次提问：实时打印工具步骤与逐字回答，返回最终文本。
+// 关键点：LLM 思考阶段（尚未产出任何 token / 工具调用）会显示“思考中…”提示，
+// 工具执行期间实时刷新进度，避免用户误以为卡死。
 func cliAsk(ag *agent.Agent, q string, base *agent.AskOptions) (string, error) {
 	fmt.Printf("\n助手> ")
+	gotDelta := false
+	// thinking 标记当前是否处于“思考中”提示态（已打印但未清除）。
+	thinking := false
+	// clearThinking 清除“思考中”提示行（用回车覆盖），避免与后续内容重叠。
+	clearThinking := func() {
+		if thinking {
+			fmt.Print("\r\033[K") // 回到行首并清空整行
+			thinking = false
+		}
+	}
 	onEvent := func(ev agent.StreamEvent) {
 		switch ev.Kind {
-		case agent.EventStep:
-			fmt.Printf("\n  🔧 调用工具: %s\n", ev.Step.Tool)
-			if ev.Step.Args != "" {
-				fmt.Printf("     参数: %s\n", truncateCLI(ev.Step.Args, 240))
+		case agent.EventThinking:
+			// LLM 思考阶段开始：显示“思考中…”（若本就已在显示则保持）。
+			if !thinking {
+				fmt.Print("\r  🤔 思考中…\033[K")
+				thinking = true
 			}
+		case agent.EventStepStart:
+			// 工具调用一发起就打印工具名与参数（流式：分析过程先出），执行期间不再像卡死。
+			clearThinking()
+			fmt.Printf("\n  🔧 调用工具: %s …\n", ev.Step.Tool)
+			if ev.Step.Args != "" {
+				fmt.Printf("     参数: %s\n", ev.Step.Args)
+			}
+		case agent.EventStepProgress:
+			// 工具执行期间的流式进度（真实进度或心跳“工具执行中…”），实时刷新，避免卡死感。
+			clearThinking()
+			if ev.Step != nil && ev.Step.Progress != "" {
+				fmt.Printf("\r  ⏳ %s\033[K", ev.Step.Progress)
+			}
+		case agent.EventStep:
+			// 结果不截断：完整打印工具返回，便于排查与查看全量数据。
+			fmt.Printf("\r\033[K") // 先清掉可能残留的进度行
 			if ev.Step.Result != "" {
-				fmt.Printf("     结果: %s\n", truncateCLI(ev.Step.Result, 240))
+				fmt.Printf("     结果: %s\n", ev.Step.Result)
 			}
 			fmt.Print("  助手> ")
+		case agent.EventAnswerDelta:
+			clearThinking()
+			fmt.Print(ev.Text)
+			gotDelta = true
 		case agent.EventAnswer:
-			fmt.Println(ev.Text)
+			// 若已逐字输出过，则跳过完整文本避免重复；否则兜底打印。
+			if !gotDelta {
+				clearThinking()
+				fmt.Println(ev.Text)
+			}
+		case agent.EventDone:
+			clearThinking()
+			fmt.Println()
 		case agent.EventError:
+			clearThinking()
 			fmt.Fprintf(os.Stderr, "\n  ⚠ 处理出错: %s\n", ev.Error)
 		}
 	}

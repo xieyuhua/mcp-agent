@@ -197,6 +197,8 @@ const (
 	KeyMCPDBDSN      = "mcp.db_dsn"
 	KeyMCPMask       = "mcp.mask_enabled"
 	KeyMCPSeed       = "mcp.seed_demo"
+	KeyMCPSandbox    = "mcp.sandbox_enabled"
+	KeyMCPWorkDir    = "mcp.work_dir"
 	KeyMCPUsername   = "mcp.username"
 	KeyMCPPassword   = "mcp.password"
 	// MCP（remote）
@@ -209,6 +211,13 @@ const (
 	KeyAgentMaxSteps      = "agent.max_steps"
 	KeyAgentUseNative     = "agent.use_native_tools"
 	KeyAgentMaxResultRows = "agent.max_result_rows"
+	// Agent 记忆窗口
+	KeyAgentMemMaxHistory      = "agent.memory_max_history"
+	KeyAgentMemSummaryThreshold = "agent.memory_summary_threshold"
+	KeyAgentMemRecentKeep      = "agent.memory_recent_keep"
+	// Log
+	KeyLogSaveToFile = "log.save_to_file"
+	KeyLogDir        = "log.dir"
 	// Prompts
 	KeyPromptBuiltin = "prompts.builtin"
 	KeyPromptRemote  = "prompts.remote"
@@ -221,8 +230,11 @@ func validKey(k string) bool {
 	switch k {
 	case KeyLLMProvider, KeyLLMBaseURL, KeyLLMModel, KeyLLMAPIKey, KeyLLMTemperature, KeyLLMMaxTokens,
 		KeyMCPMode, KeyMCPServerPath, KeyMCPDBDialect, KeyMCPDBDSN, KeyMCPMask, KeyMCPSeed,
+		KeyMCPSandbox, KeyMCPWorkDir,
 		KeyMCPUsername, KeyMCPPassword, KeyMCPBaseURL, KeyMCPTransport, KeyMCPAPIKey, KeyMCPExtra,
 		KeyAgentMaxSteps, KeyAgentUseNative, KeyAgentMaxResultRows,
+		KeyAgentMemMaxHistory, KeyAgentMemSummaryThreshold, KeyAgentMemRecentKeep,
+		KeyLogSaveToFile, KeyLogDir,
 		KeyPromptBuiltin, KeyPromptRemote, KeyAdminUser, KeyAdminPass:
 		return true
 	}
@@ -248,6 +260,8 @@ func toItems(c *config.Config) []ConfigItem {
 		mk(KeyMCPDBDSN, c.MCP.DBDsn, "后端数据库连接串"),
 		mk(KeyMCPMask, b(c.MCP.MaskEnabled), "是否启用脱敏"),
 		mk(KeyMCPSeed, b(c.MCP.SeedDemo), "是否写入演示数据"),
+		mk(KeyMCPSandbox, b(c.MCP.SandboxEnabled), "是否启用工作目录沙箱（true=文件工具只能访问 work_dir 内；false=系统环境模式，可访问任意绝对路径）"),
+		mk(KeyMCPWorkDir, c.MCP.WorkDir, "文件工具根目录（沙箱模式限定在此；留空=进程工作目录）"),
 		mk(KeyMCPUsername, c.MCP.Username, "MCP 登录账号"),
 		mk(KeyMCPPassword, c.MCP.Password, "MCP 登录密码"),
 		mk(KeyMCPBaseURL, c.MCP.BaseURL, "远程 MCP 地址（remote 模式）"),
@@ -257,6 +271,11 @@ func toItems(c *config.Config) []ConfigItem {
 		mk(KeyAgentMaxSteps, itoa(c.Agent.MaxSteps), "ReAct 最大推理步数"),
 		mk(KeyAgentUseNative, b(c.Agent.UseNativeTools), "是否使用原生工具调用"),
 		mk(KeyAgentMaxResultRows, itoa(c.Agent.MaxResultRows), "工具返回最大行数"),
+		mk(KeyAgentMemMaxHistory, itoa(c.Agent.MemoryMaxHistory), "上下文窗口：单次最多回放的历史消息条数"),
+		mk(KeyAgentMemSummaryThreshold, itoa(c.Agent.MemorySummaryThreshold), "历史消息数达到该值时触发摘要压缩"),
+		mk(KeyAgentMemRecentKeep, itoa(c.Agent.MemoryRecentKeep), "摘要压缩时保留最近 N 条原文"),
+		mk(KeyLogSaveToFile, b(c.Log.SaveToFile), "是否把每个环节的请求日志保存到文件"),
+		mk(KeyLogDir, c.Log.Dir, "日志文件目录（默认 logs）"),
 		mk(KeyPromptBuiltin, c.Prompts.Builtin, "内置数据库分析场景系统提示词"),
 		mk(KeyPromptRemote, c.Prompts.Remote, "远程 MCP 场景系统提示词"),
 		mk(KeyAdminUser, "admin", "后台管理登录账号"),
@@ -291,6 +310,10 @@ func applyItem(c *config.Config, key, value string) error {
 		c.MCP.MaskEnabled = isTrue(value)
 	case KeyMCPSeed:
 		c.MCP.SeedDemo = isTrue(value)
+	case KeyMCPSandbox:
+		c.MCP.SandboxEnabled = isTrue(value)
+	case KeyMCPWorkDir:
+		c.MCP.WorkDir = value
 	case KeyMCPUsername:
 		c.MCP.Username = value
 	case KeyMCPPassword:
@@ -309,6 +332,16 @@ func applyItem(c *config.Config, key, value string) error {
 		c.Agent.UseNativeTools = isTrue(value)
 	case KeyAgentMaxResultRows:
 		c.Agent.MaxResultRows = atoi(value)
+	case KeyAgentMemMaxHistory:
+		c.Agent.MemoryMaxHistory = atoi(value)
+	case KeyAgentMemSummaryThreshold:
+		c.Agent.MemorySummaryThreshold = atoi(value)
+	case KeyAgentMemRecentKeep:
+		c.Agent.MemoryRecentKeep = atoi(value)
+	case KeyLogSaveToFile:
+		c.Log.SaveToFile = isTrue(value)
+	case KeyLogDir:
+		c.Log.Dir = value
 	case KeyPromptBuiltin:
 		c.Prompts.Builtin = value
 	case KeyPromptRemote:

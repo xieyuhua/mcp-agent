@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"company.com/mcp-data-server/internal/repository"
 	"company.com/mcp-data-server/internal/service"
@@ -14,11 +15,13 @@ type ToolHandler struct {
 	auth       *service.AuthService
 	query      *service.QueryService
 	permission *service.PermissionService
-	workDir    string // 文件/目录工具沙箱根目录（绝对路径），空表示进程工作目录
+	web        *service.WebService
+	workDir    string // 文件/目录工具根目录（沙箱模式下为沙箱根，系统模式下仅作相对路径基准）
+	sandbox    bool   // 是否启用沙箱：true 限制在工作目录内；false 允许访问系统任意绝对路径
 }
 
-func NewToolHandler(auth *service.AuthService, query *service.QueryService, permission *service.PermissionService, workDir string) *ToolHandler {
-	return &ToolHandler{auth: auth, query: query, permission: permission, workDir: workDir}
+func NewToolHandler(auth *service.AuthService, query *service.QueryService, permission *service.PermissionService, web *service.WebService, workDir string, sandbox bool) *ToolHandler {
+	return &ToolHandler{auth: auth, query: query, permission: permission, web: web, workDir: workDir, sandbox: sandbox}
 }
 
 // ctxFromArgs 从参数中取出 token 并解析租户上下文。
@@ -54,7 +57,7 @@ func (h *ToolHandler) login(args map[string]interface{}) (interface{}, error) {
 	}, nil
 }
 
-func (h *ToolHandler) queryTable(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+func (h *ToolHandler) queryTable(ctx context.Context, args map[string]interface{}, onProgress service.ProgressFunc) (interface{}, error) {
 	_, tc, err := h.ctxFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -71,10 +74,10 @@ func (h *ToolHandler) queryTable(ctx context.Context, args map[string]interface{
 		Limit:   optInt(args["limit"]),
 		Offset:  optInt(args["offset"]),
 	}
-	return h.query.QueryTable(ctx, tc, req)
+	return h.query.QueryTable(ctx, tc, req, onProgress)
 }
 
-func (h *ToolHandler) runSQL(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+func (h *ToolHandler) runSQL(ctx context.Context, args map[string]interface{}, onProgress service.ProgressFunc) (interface{}, error) {
 	_, tc, err := h.ctxFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -83,7 +86,7 @@ func (h *ToolHandler) runSQL(ctx context.Context, args map[string]interface{}) (
 	if sql == "" {
 		return nil, fmt.Errorf("sql is required")
 	}
-	return h.query.RunSQL(ctx, tc, sql)
+	return h.query.RunSQL(ctx, tc, sql, onProgress)
 }
 
 func (h *ToolHandler) describeTable(ctx context.Context, args map[string]interface{}) (interface{}, error) {
@@ -189,6 +192,32 @@ func (h *ToolHandler) maskDelete(ctx context.Context, args map[string]interface{
 		return nil, err
 	}
 	return map[string]interface{}{"deleted": true}, nil
+}
+
+// ---- 联网查询工具 ----
+
+// webSearch 联网搜索：返回搜索结果列表（标题/链接/摘要）。需要登录态 token。
+func (h *ToolHandler) webSearch(ctx context.Context, args map[string]interface{}, onProgress service.ProgressFunc) (interface{}, error) {
+	if _, _, err := h.ctxFromArgs(args); err != nil {
+		return nil, err
+	}
+	query, _ := args["query"].(string)
+	if strings.TrimSpace(query) == "" {
+		return nil, fmt.Errorf("query is required")
+	}
+	return h.web.Search(ctx, query, optInt(args["limit"]), onProgress)
+}
+
+// webFetch 抓取指定网页并提取正文纯文本。需要登录态 token。
+func (h *ToolHandler) webFetch(ctx context.Context, args map[string]interface{}, onProgress service.ProgressFunc) (interface{}, error) {
+	if _, _, err := h.ctxFromArgs(args); err != nil {
+		return nil, err
+	}
+	targetURL, _ := args["url"].(string)
+	if strings.TrimSpace(targetURL) == "" {
+		return nil, fmt.Errorf("url is required")
+	}
+	return h.web.Fetch(ctx, targetURL, optInt(args["max_chars"]), onProgress)
 }
 
 // ---- 参数转换辅助 ----
