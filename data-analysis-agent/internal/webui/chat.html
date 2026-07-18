@@ -729,21 +729,106 @@
     if (settings.temperature > 0) body.temperature = settings.temperature;
     if (settings.max_tokens > 0) body.max_tokens = settings.max_tokens;
 
-    api("/api/ask", { method: "POST", body: body }).then(function (r) {
-      if (!r.ok) return r.json().then(function (e) { throw new Error(e.error || ("HTTP " + r.status)); });
-      return r.json();
-    }).then(function (d) {
-      removeTyping();
-      var res = d.result || d;
-      renderAssistant(res);
-      // 服务端可能新建了会话，同步到侧栏
-      if (d.conversation_id && d.conversation_id !== currentConv) {
-        currentConv = d.conversation_id;
-        loadConversations();
+    // 流式请求：边处理边渲染，避免长任务下页面假死、回答被截断。
+    fetch("/api/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token, "Accept": "text/event-stream" },
+      body: JSON.stringify(body)
+    }).then(function (r) {
+      if (!r.ok) {
+        return r.json().then(function (e) { throw new Error(e.error || ("HTTP " + r.status)); }).catch(function () { throw new Error("HTTP " + r.status); });
       }
+      removeTyping();
+      var reader = r.body.getReader();
+      var decoder = new TextDecoder("utf-8");
+      var buf = "";
+      var answerRow = null;        // 最终回答所在的 row（首次 answer 事件时创建）
+      var stepsBody = null;        // 分析过程折叠区
+      var stepsCount = 0;
+      var convId = null;
+
+      function parseFrames() {
+        var idx;
+        while ((idx = buf.indexOf("\n")) >= 0) {
+          var line = buf.slice(0, idx).trim();
+          buf = buf.slice(idx + 1);
+          if (!line) continue;
+          var ev;
+          try { ev = JSON.parse(line); } catch (e) { continue; }
+          if (ev.kind === "meta") {
+            convId = ev.conversation_id;
+            if (convId && convId !== currentConv) { currentConv = convId; loadConversations(); }
+          } else if (ev.kind === "step") {
+            if (!stepsBody) {
+              // 首次出现步骤时，创建"分析过程"折叠区
+              var row = document.createElement("div"); row.className = "row assistant";
+              var av = document.createElement("div"); av.className = "avatar"; av.textContent = "AI";
+              var bubble = document.createElement("div"); bubble.className = "bubble";
+              var steps = document.createElement("div"); steps.className = "steps block";
+              var btn = document.createElement("button"); btn.className = "steps-toggle";
+              var show = settings.showSteps;
+              btn.textContent = "查看分析过程";
+              stepsBody = document.createElement("div"); stepsBody.className = "steps-body";
+              stepsBody.style.display = show ? "flex" : "none";
+              btn.onclick = function () {
+                var vis = stepsBody.style.display !== "none";
+                stepsBody.style.display = vis ? "none" : "flex";
+                btn.textContent = (vis ? "查看" : "收起") + "分析过程（" + stepsCount + " 步）";
+              };
+              steps.appendChild(btn); steps.appendChild(stepsBody);
+              bubble.appendChild(steps); row.appendChild(av); row.appendChild(bubble);
+              chatEl.appendChild(row); scrollBottom();
+            }
+            stepsCount++;
+            var st = document.createElement("div"); st.className = "step";
+            var tool = document.createElement("div"); tool.className = "step-tool"; tool.textContent = "🔧 " + (ev.step.tool || "");
+            var a = document.createElement("pre"); a.className = "step-args"; a.textContent = ev.step.args || "";
+            var rr = document.createElement("pre"); rr.className = "step-result"; rr.textContent = ev.step.result || "";
+            st.appendChild(tool); st.appendChild(a); st.appendChild(rr);
+            stepsBody.appendChild(st);
+            var btnEl = stepsBody.previousSibling;
+            if (btnEl) btnEl.textContent = (stepsBody.style.display !== "none" ? "收起" : "查看") + "分析过程（" + stepsCount + " 步）";
+            scrollBottom();
+          } else if (ev.kind === "answer") {
+            if (!answerRow) {
+              answerRow = document.createElement("div"); answerRow.className = "row assistant";
+              var av2 = document.createElement("div"); av2.className = "avatar"; av2.textContent = "AI";
+              var bubble2 = document.createElement("div"); bubble2.className = "bubble";
+              var md = document.createElement("div"); md.className = "md";
+              answerRow._md = md;
+              bubble2.appendChild(md); answerRow.appendChild(av2); answerRow.appendChild(bubble2);
+              chatEl.appendChild(answerRow); scrollBottom();
+            }
+            answerRow._md.innerHTML = renderMarkdown(ev.text || "");
+            scrollBottom();
+          } else if (ev.kind === "error") {
+            removeTyping();
+            addError(ev.error || "处理出错"); setOnline(false);
+          } else if (ev.kind === "done" || ev.kind === "close") {
+            // 完成：若尚未渲染任何回答，补一个占位
+            if (!answerRow && ev.kind === "close") {
+              // close 可能在没有 answer 时到达（极少），忽略
+            }
+          }
+        }
+      }
+
+      function loop() {
+        return reader.read().then(function (res2) {
+          if (res2.done) {
+            parseFrames();
+            return;
+          }
+          buf += decoder.decode(res2.value, { stream: true });
+          parseFrames();
+          return loop();
+        });
+      }
+      return loop();
+    }).then(function () {
+      loading = false; sendBtn.disabled = false;
     }).catch(function (e) {
       removeTyping(); addError(e.message || "请求失败"); setOnline(false);
-    }).then(function () {
       loading = false; sendBtn.disabled = false;
     });
   }

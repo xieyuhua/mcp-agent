@@ -77,15 +77,17 @@ func (c *Client) Chat(messages []Message, tools []Tool) (*Response, error) {
 // ---- Ollama ----
 
 func (c *Client) chatOllama(messages []Message, tools []Tool) (*Response, error) {
+	options := map[string]interface{}{"temperature": c.temperature}
+	// maxTokens<=0 表示不限制生成长度，避免回答被截断。
+	if c.maxTokens > 0 {
+		options["num_predict"] = c.maxTokens
+	}
 	reqBody := map[string]interface{}{
 		"model":    c.model,
 		"messages": toOllamaMessages(messages),
 		"stream":   false,
 		"tools":    toOllamaTools(tools),
-		"options": map[string]interface{}{
-			"temperature": c.temperature,
-			"num_predict": c.maxTokens,
-		},
+		"options":  options,
 	}
 	var out struct {
 		Message struct {
@@ -213,8 +215,11 @@ func (c *Client) chatOpenAI(messages []Message, tools []Tool) (*Response, error)
 		"model":       c.model,
 		"messages":    msgs,
 		"temperature": c.temperature,
-		"max_tokens":  c.maxTokens,
 		"tools":       toolDefs,
+	}
+	// maxTokens<=0 表示不限制生成长度，避免回答被截断。
+	if c.maxTokens > 0 {
+		reqBody["max_tokens"] = c.maxTokens
 	}
 	var out struct {
 		Choices []struct {
@@ -264,7 +269,10 @@ func (c *Client) chatNoTools(messages []Message) (*Response, error) {
 			"model":       c.model,
 			"messages":    msgs,
 			"temperature": c.temperature,
-			"max_tokens":  c.maxTokens,
+		}
+		// maxTokens<=0 表示不限制生成长度，避免回答被截断。
+		if c.maxTokens > 0 {
+			reqBody["max_tokens"] = c.maxTokens
 		}
 		var out struct {
 			Choices []struct {
@@ -282,14 +290,16 @@ func (c *Client) chatNoTools(messages []Message) (*Response, error) {
 		return &Response{Content: out.Choices[0].Message.Content}, nil
 	}
 	// Ollama 无工具
+	options := map[string]interface{}{"temperature": c.temperature}
+	// maxTokens<=0 表示不限制生成长度，避免回答被截断。
+	if c.maxTokens > 0 {
+		options["num_predict"] = c.maxTokens
+	}
 	reqBody := map[string]interface{}{
 		"model":    c.model,
 		"messages": toOllamaMessages(messages),
 		"stream":   false,
-		"options": map[string]interface{}{
-			"temperature": c.temperature,
-			"num_predict": c.maxTokens,
-		},
+		"options":  options,
 	}
 	var out struct {
 		Message struct {

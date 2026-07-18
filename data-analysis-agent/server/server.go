@@ -139,13 +139,13 @@ func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
 	history := s.loadHistory(user.ID, conv.ID, 30)
 
 	// 组装可选的基础设置覆盖项（空值表示沿用运行配置）。
-	var opts *agent.AskOptions
-	if req.Model != "" || req.Temperature > 0 || req.MaxTokens > 0 {
-		opts = &agent.AskOptions{
-			Model:       req.Model,
-			Temperature: req.Temperature,
-			MaxTokens:   req.MaxTokens,
-		}
+	opts := buildAskOpts(req.Model, req.Temperature, req.MaxTokens)
+
+	// 流式请求（前端带 Accept: text/event-stream）：边处理边推送 SSE 事件，
+	// 避免长任务下前端长时间无响应，且回答不再因等待整轮完成而被"截断"显示。
+	if r.Header.Get("Accept") == "text/event-stream" {
+		s.handleAskStream(w, r, user, conv, history, q, opts)
+		return
 	}
 
 	s.mu.Lock()
@@ -157,14 +157,93 @@ func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 持久化本轮问答（user + assistant）。assistant 的富结果存入 extra 供回放。
-	_, _ = s.users.AddMessage(conv.ID, "user", q, "")
-	extra := marshalExtra(res)
-	_, _ = s.users.AddMessage(conv.ID, "assistant", res.Answer, extra)
+	s.persistRound(conv.ID, q, res)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"conversation_id": conv.ID,
 		"result":          res,
 	})
+}
+
+// buildAskOpts 组装单次提问的可选覆盖项；全空时返回 nil（沿用运行配置）。
+func buildAskOpts(model string, temperature float64, maxTokens int) *agent.AskOptions {
+	if model == "" && temperature <= 0 && maxTokens <= 0 {
+		return nil
+	}
+	return &agent.AskOptions{
+		Model:       model,
+		Temperature: temperature,
+		MaxTokens:   maxTokens,
+	}
+}
+
+// persistRound 持久化一轮问答（user + assistant），assistant 富结果存入 extra 供回放。
+func (s *Server) persistRound(convID, q string, res *agent.AskResult) {
+	_, _ = s.users.AddMessage(convID, "user", q, "")
+	if res == nil {
+		return
+	}
+	extra := marshalExtra(res)
+	_, _ = s.users.AddMessage(convID, "assistant", res.Answer, extra)
+}
+
+// handleAskStream 以 SSE 流式返回 agent 处理过程：先把 conversation_id 发出，
+// 随后按 step/answer/done/error 事件增量推送，最后持久化本轮问答。
+func (s *Server) handleAskStream(w http.ResponseWriter, r *http.Request, user *userdb.User, conv *userdb.Conversation, history []agent.HistoryItem, q string, opts *agent.AskOptions) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": "服务器不支持流式响应"})
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	enc := json.NewEncoder(w)
+	send := func(v interface{}) {
+		_ = enc.Encode(v)
+		flusher.Flush()
+	}
+	// 先把会话 ID 告知前端（便于后续消息归属与侧栏同步）。
+	send(map[string]interface{}{"kind": "meta", "conversation_id": conv.ID})
+
+	// 流式事件回调：把 agent 事件转成 SSE 数据帧。
+	streamOpts := &agent.AskOptions{}
+	if opts != nil {
+		streamOpts.Model = opts.Model
+		streamOpts.Temperature = opts.Temperature
+		streamOpts.MaxTokens = opts.MaxTokens
+	}
+	var finalResult *agent.AskResult
+	var gotErr string
+	streamOpts.OnEvent = func(ev agent.StreamEvent) {
+		switch ev.Kind {
+		case agent.EventStep:
+			send(map[string]interface{}{"kind": "step", "step": ev.Step})
+		case agent.EventAnswer:
+			send(map[string]interface{}{"kind": "answer", "text": ev.Text})
+		case agent.EventDone:
+			send(map[string]interface{}{"kind": "done"})
+		case agent.EventError:
+			gotErr = ev.Error
+			send(map[string]interface{}{"kind": "error", "error": ev.Error})
+		}
+	}
+
+	// 复用带历史的富结果入口（持锁在 agent 内部）。
+	s.mu.Lock()
+	res, aerr := s.ag.AskRichWithHistory(history, q, streamOpts)
+	s.mu.Unlock()
+	if aerr != nil && gotErr == "" {
+		gotErr = aerr.Error()
+		send(map[string]interface{}{"kind": "error", "error": aerr.Error()})
+	}
+	finalResult = res
+
+	// 持久化本轮问答（与同步接口一致）。
+	s.persistRound(conv.ID, q, finalResult)
+	send(map[string]interface{}{"kind": "close"})
 }
 
 // resolveConversation 若传了会话 ID 则校验归属；否则用问题前缀作为标题新建会话。

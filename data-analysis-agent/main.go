@@ -94,13 +94,10 @@ func main() {
 	}
 
 	if *question != "" {
-		answer, err := ag.AskWith(*question, cliOpts)
-		if err != nil {
+		if _, err := cliAsk(ag, *question, cliOpts); err != nil {
 			fmt.Fprintf(os.Stderr, "分析失败: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Println("\n===== 分析结果 =====")
-		fmt.Println(answer)
 		return
 	}
 
@@ -124,14 +121,44 @@ func main() {
 		if q == "exit" || q == "quit" {
 			break
 		}
-		answer, err := ag.AskWith(q, cliOpts)
-		if err != nil {
+		if _, err := cliAsk(ag, q, cliOpts); err != nil {
 			fmt.Fprintf(os.Stderr, "分析失败: %v\n", err)
 			continue
 		}
-		fmt.Println("\n助手> " + answer)
 	}
 	fmt.Println("再见。")
+}
+
+// cliAsk 以流式方式处理一次提问：实时打印工具步骤与最终回答，返回最终文本。
+func cliAsk(ag *agent.Agent, q string, base *agent.AskOptions) (string, error) {
+	fmt.Printf("\n助手> ")
+	onEvent := func(ev agent.StreamEvent) {
+		switch ev.Kind {
+		case agent.EventStep:
+			fmt.Printf("\n  🔧 调用工具: %s\n", ev.Step.Tool)
+			if ev.Step.Args != "" {
+				fmt.Printf("     参数: %s\n", truncateCLI(ev.Step.Args, 240))
+			}
+			if ev.Step.Result != "" {
+				fmt.Printf("     结果: %s\n", truncateCLI(ev.Step.Result, 240))
+			}
+			fmt.Print("  助手> ")
+		case agent.EventAnswer:
+			fmt.Println(ev.Text)
+		case agent.EventError:
+			fmt.Fprintf(os.Stderr, "\n  ⚠ 处理出错: %s\n", ev.Error)
+		}
+	}
+	return ag.AskWithStream(q, base, onEvent)
+}
+
+// truncateCLI 按 rune 截断字符串，避免中文被切半。
+func truncateCLI(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "..."
 }
 
 // remoteTransportName 返回远程 MCP 传输方式的可读名称（默认 streamable-http）。

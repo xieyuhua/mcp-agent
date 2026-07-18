@@ -291,8 +291,9 @@ func (a *Agent) buildTools() []llm.Tool {
 
 // localDataTools 本地内置 mcp-data-server 的数据库分析工具（带中文描述与映射）。
 func (a *Agent) localDataTools() []llm.Tool {
-	return []llm.Tool{
-		{
+	tools := make([]llm.Tool, 0, 10) // 内置工具数量固定，预分配容量避免扩容
+	tools = append(tools,
+		llm.Tool{
 			Name:        "describe_table",
 			Description: "查看某张数据表的字段结构（列名）。在编写 SQL 前先了解表结构。",
 			Parameters: map[string]interface{}{
@@ -303,7 +304,7 @@ func (a *Agent) localDataTools() []llm.Tool {
 				"required": []string{"table"},
 			},
 		},
-		{
+		llm.Tool{
 			Name:        "query_data",
 			Description: "结构化安全查询（推荐给非管理员角色）：按表名+字段+过滤条件查询，自动叠加租户/区域/门店隔离并对敏感字段脱敏。",
 			Parameters: map[string]interface{}{
@@ -318,7 +319,7 @@ func (a *Agent) localDataTools() []llm.Tool {
 				"required": []string{"table"},
 			},
 		},
-		{
+		llm.Tool{
 			Name:        "run_sql",
 			Description: "执行原生只读 SQL（仅平台运营 super_admin 可用）。用于复杂分析（聚合、联表、分组统计）。MCP 会自动拦截危险关键字并做权限/审计。优先使用 SELECT。",
 			Parameters: map[string]interface{}{
@@ -330,7 +331,7 @@ func (a *Agent) localDataTools() []llm.Tool {
 			},
 		},
 		// --- 文件 / 目录读写（由内置 mcp-data-server 提供，沙箱在 work_dir 内） ---
-		{
+		llm.Tool{
 			Name:        "read_file",
 			Description: "读取文本文件内容（路径相对于 MCP 工作目录沙箱）。用于查看配置文件、日志、导出的数据等。",
 			Parameters: map[string]interface{}{
@@ -342,7 +343,7 @@ func (a *Agent) localDataTools() []llm.Tool {
 				"required": []string{"path"},
 			},
 		},
-		{
+		llm.Tool{
 			Name:        "write_file",
 			Description: "写入文本文件（覆盖，父目录自动创建）。用于生成分析报告、导出查询结果。路径相对于工作目录。",
 			Parameters: map[string]interface{}{
@@ -354,7 +355,7 @@ func (a *Agent) localDataTools() []llm.Tool {
 				"required": []string{"path", "content"},
 			},
 		},
-		{
+		llm.Tool{
 			Name:        "append_file",
 			Description: "向文件末尾追加文本（不存在则创建）。用于日志累积、结果追加。路径相对于工作目录。",
 			Parameters: map[string]interface{}{
@@ -366,7 +367,7 @@ func (a *Agent) localDataTools() []llm.Tool {
 				"required": []string{"path", "content"},
 			},
 		},
-		{
+		llm.Tool{
 			Name:        "list_dir",
 			Description: "列出目录下的文件与子目录（含名称/类型/大小/修改时间）。路径相对于工作目录，留空=根目录。",
 			Parameters: map[string]interface{}{
@@ -376,7 +377,7 @@ func (a *Agent) localDataTools() []llm.Tool {
 				},
 			},
 		},
-		{
+		llm.Tool{
 			Name:        "make_dir",
 			Description: "创建目录（含多级父目录）。路径相对于工作目录。",
 			Parameters: map[string]interface{}{
@@ -387,7 +388,7 @@ func (a *Agent) localDataTools() []llm.Tool {
 				"required": []string{"path"},
 			},
 		},
-		{
+		llm.Tool{
 			Name:        "delete_file",
 			Description: "删除一个文件（不会删除目录）。路径相对于工作目录。删除前确认路径正确。",
 			Parameters: map[string]interface{}{
@@ -398,7 +399,7 @@ func (a *Agent) localDataTools() []llm.Tool {
 				"required": []string{"path"},
 			},
 		},
-		{
+		llm.Tool{
 			Name:        "read_dir_tree",
 			Description: "递归列出目录树（最多两层）。用于了解工作目录整体结构。路径相对于工作目录，留空=根目录。",
 			Parameters: map[string]interface{}{
@@ -408,7 +409,8 @@ func (a *Agent) localDataTools() []llm.Tool {
 				},
 			},
 		},
-	}
+	)
+	return tools
 }
 
 // loadSchema 预加载表结构，拼成系统提示片段。
@@ -428,8 +430,7 @@ func (a *Agent) loadSchema(tables []string) string {
 		found = true
 	}
 	if !found {
-		sb.Reset()
-		sb.WriteString("")
+		return ""
 	}
 	return sb.String()
 }
@@ -459,6 +460,27 @@ type AskOptions struct {
 	Model       string  `json:"model"`        // 覆盖模型名
 	Temperature float64 `json:"temperature"`  // 覆盖生成温度（<=0 表示沿用）
 	MaxTokens   int     `json:"max_tokens"`   // 覆盖单次生成上限（<=0 表示沿用）
+	// OnEvent 流式回调：处理过程中逐步推送事件（步骤/最终回答/图表/表格）。
+	// 为 nil 时退化为非流式（仅返回最终 AskResult）。
+	OnEvent func(StreamEvent)
+}
+
+// StreamEventKind 流式事件类型。
+type StreamEventKind string
+
+const (
+	EventStep   StreamEventKind = "step"   // 一次工具调用完成（含步骤日志）
+	EventAnswer StreamEventKind = "answer" // 最终文字结论（一次性给出，因为底层 LLM 非流式）
+	EventDone   StreamEventKind = "done"   // 整轮处理完成
+	EventError  StreamEventKind = "error"  // 处理出错
+)
+
+// StreamEvent 流式处理过程中的一个事件。
+type StreamEvent struct {
+	Kind  StreamEventKind `json:"kind"`
+	Step  *StepLog        `json:"step,omitempty"`  // EventStep 时携带
+	Text  string          `json:"text,omitempty"`  // EventAnswer 时携带最终回答
+	Error string          `json:"error,omitempty"` // EventError 时携带错误信息
 }
 
 // LLMInfo 返回当前生效的 LLM 配置摘要，供前端"基础设置"初始化。
@@ -488,6 +510,24 @@ func (a *Agent) AskWith(question string, opts *AskOptions) (string, error) {
 	return res.Answer, nil
 }
 
+// AskWithStream 同 AskWith，但边处理边通过 onEvent 推送流式事件（步骤/最终回答/错误）。
+// 返回最终分析文本（即使 onEvent 已消费 answer 事件，这里也兜底返回）。
+// 供命令行等需要实时进度的调用方使用。
+func (a *Agent) AskWithStream(question string, base *AskOptions, onEvent func(StreamEvent)) (string, error) {
+	opts := &AskOptions{}
+	if base != nil {
+		opts.Model = base.Model
+		opts.Temperature = base.Temperature
+		opts.MaxTokens = base.MaxTokens
+	}
+	opts.OnEvent = onEvent
+	res, err := a.AskRich(question, opts)
+	if err != nil {
+		return "", err
+	}
+	return res.Answer, nil
+}
+
 // HistoryMessage 一条历史对话消息（用于多轮上下文记忆）。
 // 兼容旧调用：仅含文本。新代码建议用 HistoryItem（含结构化 extra）。
 type HistoryMessage struct {
@@ -501,6 +541,31 @@ func (a *Agent) AskRich(question string, opts *AskOptions) (*AskResult, error) {
 	return a.AskRichWithHistory(nil, question, opts)
 }
 
+// resolveLLMClient 根据单次覆盖项返回本轮使用的 LLM 客户端。
+// 无覆盖项时复用全局客户端；有覆盖项时构造一个临时客户端，不影响全局运行配置。
+func (a *Agent) resolveLLMClient(opts *AskOptions) *llm.Client {
+	if opts == nil {
+		return a.llm
+	}
+	model := a.cfg.LLM.Model
+	temp := a.cfg.LLM.Temperature
+	maxTok := a.cfg.LLM.MaxTokens
+	if opts.Model != "" {
+		model = opts.Model
+	}
+	if opts.Temperature > 0 {
+		temp = opts.Temperature
+	}
+	if opts.MaxTokens > 0 {
+		maxTok = opts.MaxTokens
+	}
+	// 没有任何覆盖项时直接复用全局客户端，避免无谓重建。
+	if model == a.cfg.LLM.Model && temp == a.cfg.LLM.Temperature && maxTok == a.cfg.LLM.MaxTokens {
+		return a.llm
+	}
+	return llm.NewClient(a.cfg.LLM.Provider, a.cfg.LLM.BaseURL, model, a.cfg.LLM.APIKey, temp, maxTok)
+}
+
 // AskRichWithHistory 在带历史上下文的情况下处理一次提问，实现多轮对话记忆。
 // history 为按时间正序排列的既往消息（不含本次 question），可携带结构化 extra（图表/表格/SQL）。
 func (a *Agent) AskRichWithHistory(history []HistoryItem, question string, opts *AskOptions) (*AskResult, error) {
@@ -508,22 +573,7 @@ func (a *Agent) AskRichWithHistory(history []HistoryItem, question string, opts 
 	defer a.mu.Unlock()
 
 	// 若前端携带覆盖项，则本次使用一个临时 LLM 客户端，不影响全局运行配置。
-	llmClient := a.llm
-	if opts != nil && (opts.Model != "" || opts.Temperature > 0 || opts.MaxTokens > 0) {
-		model := a.cfg.LLM.Model
-		temp := a.cfg.LLM.Temperature
-		maxTok := a.cfg.LLM.MaxTokens
-		if opts.Model != "" {
-			model = opts.Model
-		}
-		if opts.Temperature > 0 {
-			temp = opts.Temperature
-		}
-		if opts.MaxTokens > 0 {
-			maxTok = opts.MaxTokens
-		}
-		llmClient = llm.NewClient(a.cfg.LLM.Provider, a.cfg.LLM.BaseURL, model, a.cfg.LLM.APIKey, temp, maxTok)
-	}
+	llmClient := a.resolveLLMClient(opts)
 
 	system := a.systemPrompt()
 	messages := []llm.Message{
@@ -544,6 +594,11 @@ func (a *Agent) AskRichWithHistory(history []HistoryItem, question string, opts 
 	messages = append(messages, histMsgs...)
 	messages = append(messages, llm.Message{Role: "user", Content: question})
 	result := &AskResult{}
+	onEvent := func(ev StreamEvent) {
+		if opts != nil && opts.OnEvent != nil {
+			opts.OnEvent(ev)
+		}
+	}
 
 	for step := 0; step < a.cfg.Agent.MaxSteps; step++ {
 		var resp *llm.Response
@@ -564,6 +619,8 @@ func (a *Agent) AskRichWithHistory(history []HistoryItem, question string, opts 
 		// 没有工具调用 -> 视为最终回答
 		if len(resp.ToolCalls) == 0 {
 			result.Answer = strings.TrimSpace(resp.Content)
+			onEvent(StreamEvent{Kind: EventAnswer, Text: result.Answer})
+			onEvent(StreamEvent{Kind: EventDone})
 			return result, nil
 		}
 
@@ -572,14 +629,18 @@ func (a *Agent) AskRichWithHistory(history []HistoryItem, question string, opts 
 			fmt.Printf("[agent] 模型请求调用工具: %s 参数=%s\n", tc.Name, tc.Arguments)
 			toolResult := a.executeTool(tc, result)
 			fmt.Printf("[agent] 工具返回(已截断): %s\n", truncate(toolResult, 300))
-			result.Steps = append(result.Steps, StepLog{Tool: tc.Name, Args: tc.Arguments, Result: truncate(toolResult, 500)})
+			stepLog := StepLog{Tool: tc.Name, Args: tc.Arguments, Result: truncate(toolResult, 500)}
+			result.Steps = append(result.Steps, stepLog)
+			onEvent(StreamEvent{Kind: EventStep, Step: &stepLog})
 			messages = append(messages,
 				llm.Message{Role: "assistant", Content: resp.Content, ToolCalls: []llm.ToolCall{tc}},
 				llm.Message{Role: "tool", Content: toolResult, ToolCallID: tc.ID, Name: tc.Name},
 			)
 		}
 	}
-	return nil, fmt.Errorf("已达到最大推理步数 %d，仍未给出最终结论", a.cfg.Agent.MaxSteps)
+	err := fmt.Errorf("已达到最大推理步数 %d，仍未给出最终结论", a.cfg.Agent.MaxSteps)
+	onEvent(StreamEvent{Kind: EventError, Error: err.Error()})
+	return nil, err
 }
 
 // executeTool 执行一个工具调用：解析参数后按工具名在注册表中查找并执行（picoclaw 风格统一分发）。
