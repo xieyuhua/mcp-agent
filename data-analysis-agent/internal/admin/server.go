@@ -171,9 +171,9 @@ func (s *Server) buildRouter() *gin.Engine {
 			contentType := "application/octet-stream"
 			switch {
 			case strings.HasSuffix(path, ".js"):
-				contentType = "application/javascript"
+				contentType = "application/javascript; charset=utf-8"
 			case strings.HasSuffix(path, ".css"):
-				contentType = "text/css"
+				contentType = "text/css; charset=utf-8"
 			case strings.HasSuffix(path, ".html"):
 				contentType = "text/html; charset=utf-8"
 			case strings.HasSuffix(path, ".png"):

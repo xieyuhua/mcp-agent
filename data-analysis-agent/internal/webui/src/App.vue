@@ -168,10 +168,10 @@ async function loadMessages(id, opts) {
     if (loadMoreEl.value) { loadMoreEl.value.remove(); loadMoreEl.value = null }
     if (latest) {
       resetChat()
-      msgs.forEach(m => { chatEl.value.appendChild(m.role === 'user' ? buildUserRowStatic(m.content) : buildAssistantRowStatic(fromMessage(m))) })
+      msgs.forEach(m => { chatEl.value.appendChild(m.role === 'user' ? buildUserRow(m.content) : buildAssistantRow(fromMessage(m))) })
     } else {
       const before = chatEl.value.firstChild
-      msgs.forEach(m => { chatEl.value.insertBefore(m.role === 'user' ? buildUserRowStatic(m.content) : buildAssistantRowStatic(fromMessage(m)), before) })
+      msgs.forEach(m => { chatEl.value.insertBefore(m.role === 'user' ? buildUserRow(m.content) : buildAssistantRow(fromMessage(m)), before) })
     }
     if (hasMoreMsgs.value) prependLoadMore()
   } catch (e) { errMsg.value = e.message }

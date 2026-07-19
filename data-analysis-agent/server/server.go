@@ -797,10 +797,7 @@ func (s *Server) serveUI(defaultFile string) gin.HandlerFunc {
 				return
 			}
 		}
-		ctype := mime.TypeByExtension(filepath.Ext(path))
-		if ctype == "" {
-			ctype = "text/html; charset=utf-8"
-		}
+		ctype := mimeTypeWithCharset(filepath.Ext(path))
 		c.Header("Content-Type", ctype)
 		c.Header("Cache-Control", "no-store")
 		c.Data(http.StatusOK, ctype, data)
@@ -822,13 +819,31 @@ func (s *Server) serveUIAssets(c *gin.Context) {
 		c.String(http.StatusNotFound, "page not found")
 		return
 	}
-	ctype := mime.TypeByExtension(filepath.Ext(path))
-	if ctype == "" {
-		ctype = "application/octet-stream"
-	}
+	ctype := mimeTypeWithCharset(filepath.Ext(path))
 	c.Header("Content-Type", ctype)
 	c.Header("Cache-Control", "max-age=3600")
 	c.Data(http.StatusOK, ctype, data)
+}
+
+// mimeTypeWithCharset 返回带 charset=utf-8 的 Content-Type，避免 Windows 上用系统 locale（如 GBK）解码含中文的页面。
+func mimeTypeWithCharset(ext string) string {
+	switch ext {
+	case ".html":
+		return "text/html; charset=utf-8"
+	case ".js":
+		return "application/javascript; charset=utf-8"
+	case ".css":
+		return "text/css; charset=utf-8"
+	case ".json":
+		return "application/json; charset=utf-8"
+	case ".svg":
+		return "image/svg+xml; charset=utf-8"
+	}
+	ctype := mime.TypeByExtension(ext)
+	if ctype == "" {
+		return "application/octet-stream"
+	}
+	return ctype
 }
 
 func normalizeAddr(addr string) string {
