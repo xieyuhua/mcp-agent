@@ -42,6 +42,9 @@ var AdminPermissions = []Permission{
 	{Code: "chat_log:read", Name: "沟通日志查看", Module: "日志管理"},
 	{Code: "llm_log:read", Name: "LLM 日志查看", Module: "日志管理"},
 	{Code: "mcp_log:read", Name: "MCP 日志查看", Module: "日志管理"},
+	{Code: "request_log:read", Name: "请求日志查看", Module: "日志管理"},
+	{Code: "activity_log:read", Name: "内部活动日志查看", Module: "日志管理"},
+	{Code: "skill:write", Name: "技能热重载", Module: "技能管理"},
 }
 
 // Permission 描述一项可分配的权限。
@@ -131,6 +134,9 @@ func (s *Server) buildRouter() *gin.Engine {
 		api.GET("/chat-logs", s.requireAuth(), s.requirePerm("chat_log:read"), s.handleChatLogs)
 		api.GET("/llm-logs", s.requireAuth(), s.requirePerm("llm_log:read"), s.handleLLMLogs)
 		api.GET("/mcp-logs", s.requireAuth(), s.requirePerm("mcp_log:read"), s.handleMCPLogs)
+		api.GET("/request-logs", s.requireAuth(), s.requirePerm("request_log:read"), s.handleRequestLogs)
+		api.GET("/activity-logs", s.requireAuth(), s.requirePerm("activity_log:read"), s.handleActivityLogs)
+		api.POST("/reload-skills", s.requireAuth(), s.requirePerm("skill:write"), s.handleReloadSkills)
 	}
 
 	// Vue 后台管理构建产物：统一通过 /admin 和 /admin/* 提供，找不到的文件回退到 index.html。
@@ -822,6 +828,87 @@ func (s *Server) handleMCPLogs(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"logs": list, "total": total, "page": page, "size": size})
+}
+
+func (s *Server) handleRequestLogs(c *gin.Context) {
+	if !s.usersReady(c) {
+		return
+	}
+	page, _ := strconv.Atoi(c.Query("page"))
+	size, _ := strconv.Atoi(c.Query("size"))
+	defaultSize := s.ag.UIConfig().AdminPageSize
+	if defaultSize <= 0 || defaultSize > 200 {
+		defaultSize = 20
+	}
+	if page < 1 {
+		page = 1
+	}
+	if size <= 0 || size > 200 {
+		size = defaultSize
+	}
+	status, _ := strconv.Atoi(c.Query("status"))
+	list, total, err := s.users.ListRequestLogs(userdb.RequestLogFilter{
+		Method:   c.Query("method"),
+		Path:     c.Query("path"),
+		Route:    c.Query("route"),
+		Status:   status,
+		Username: c.Query("username"),
+		ClientIP: c.Query("client_ip"),
+		Keyword:  c.Query("keyword"),
+		DateFrom: c.Query("date_from"),
+		DateTo:   c.Query("date_to"),
+		Page:     page,
+		Size:     size,
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"logs": list, "total": total, "page": page, "size": size})
+}
+
+func (s *Server) handleActivityLogs(c *gin.Context) {
+	if !s.usersReady(c) {
+		return
+	}
+	page, _ := strconv.Atoi(c.Query("page"))
+	size, _ := strconv.Atoi(c.Query("size"))
+	defaultSize := s.ag.UIConfig().AdminPageSize
+	if defaultSize <= 0 || defaultSize > 200 {
+		defaultSize = 20
+	}
+	if page < 1 {
+		page = 1
+	}
+	if size <= 0 || size > 200 {
+		size = defaultSize
+	}
+	list, total, err := s.users.ListAgentActivityLogs(userdb.AgentActivityLogFilter{
+		Kind:     c.Query("kind"),
+		Target:   c.Query("target"),
+		Keyword:  c.Query("keyword"),
+		DateFrom: c.Query("date_from"),
+		DateTo:   c.Query("date_to"),
+		Page:     page,
+		Size:     size,
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"logs": list, "total": total, "page": page, "size": size})
+}
+
+// handleReloadSkills 运行时热重载技能目录（无需重启进程）。
+func (s *Server) handleReloadSkills(c *gin.Context) {
+	if !s.usersReady(c) {
+		return
+	}
+	if err := s.ag.ReloadSkills(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "skills": s.ag.SkillNames()})
 }
 
 // ---- 管理员 ----

@@ -32,6 +32,7 @@ func main() {
 	debug := flag.Bool("vv", false, "CLI 模式下打印 Debug 级日志（含完整 prompt/tools 等）")
 	addr := flag.String("addr", ":8088", "HTTP 监听地址")
 	staticDir := flag.String("static", "web/dist", "前端静态资源目录（前端 build 产物）")
+	skillsDir := flag.String("skills", "", "技能目录（默认 skills），留空沿用配置")
 	flag.Parse()
 
 	// 加载文件配置作为数据库种子（文件缺失不致命，回退到内置默认值）。
@@ -53,6 +54,9 @@ func main() {
 	effCfg := store.Get()
 	if *model != "" {
 		effCfg.LLM.Model = *model
+	}
+	if *skillsDir != "" {
+		effCfg.SkillsDir = *skillsDir
 	}
 
 	// 初始化运行日志：根据配置决定是否把每个环节的请求日志保存到文件（带时间戳）。
@@ -109,6 +113,16 @@ func main() {
 			fmt.Fprintf(os.Stderr, "打开用户数据库失败: %v\n", err)
 			os.Exit(1)
 		}
+		// 必须在 agent.New 之前注入调用日志存储，以捕获初始化阶段（MCP 连接、
+		// 技能加载、预加载表结构）的内部活动日志。
+		ag.SetCallLogStore(users)
+		// 重新构造 Agent，使初始化阶段日志能被捕获（callLogStore 已就绪）。
+		ag.Close()
+		ag, err = agent.New(effCfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "启动失败: %v\n", err)
+			os.Exit(1)
+		}
 		ag.SetCallLogStore(users)
 		adminSvc = admin.New(store, users, ag)
 		srv := server.New(ag, users, *staticDir, adminSvc.Handler())
@@ -128,7 +142,7 @@ func main() {
 	}
 
 	// 交互 REPL
-	fmt.Println("\n数据分析助手已就绪。输入自然语言问题开始分析（输入 exit/quit 退出）。")
+	fmt.Println("\n数据分析助手已就绪。输入自然语言问题开始分析（输入 exit/quit 退出，/skills 查看已加载技能）。")
 	if cliOpts != nil {
 		fmt.Printf("（本次会话生效的基础设置：model=%q temperature=%v max_tokens=%v）\n",
 			cliOpts.Model, cliOpts.Temperature, cliOpts.MaxTokens)
@@ -146,6 +160,19 @@ func main() {
 		}
 		if q == "exit" || q == "quit" {
 			break
+		}
+		// /skills 列出已加载的技能（不进入问答流程）
+		if q == "/skills" {
+			names := ag.SkillNames()
+			if len(names) == 0 {
+				fmt.Println("（未加载任何技能，请检查 skills_dir 配置与 skills/ 目录）")
+			} else {
+				fmt.Println("已加载技能：")
+				for _, n := range names {
+					fmt.Printf("  - %s：%s\n", n, ag.SkillDescription(n))
+				}
+			}
+			continue
 		}
 		if _, err := cliAsk(ag, q, cliOpts); err != nil {
 			fmt.Fprintf(os.Stderr, "分析失败: %v\n", err)

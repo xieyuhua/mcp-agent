@@ -3,10 +3,13 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
+	"company.com/data-analysis-agent/internal/logger"
 	"company.com/data-analysis-agent/llm"
 	"company.com/data-analysis-agent/mcpclient"
+	"company.com/data-analysis-agent/skill"
 )
 
 // toolRunner 工具执行函数（picoclaw 风格：每个工具都是自包含的「名称+描述+处理函数」单元）。
@@ -20,6 +23,22 @@ func (a *Agent) buildRegistry(specs []llm.Tool) map[string]toolRunner {
 	reg := make(map[string]toolRunner, len(specs))
 	for _, s := range specs {
 		name := s.Name
+		// use_skill：加载预定义技能工作流并回灌给模型，模型随后按指引执行（与 ReAct 循环兼容）。
+		if name == "use_skill" {
+			reg[name] = func(userID, convID string, args map[string]interface{}, result *AskResult, onProgress func(message string)) (string, error) {
+				nameArg, _ := args["name"].(string)
+				a.mu.RLock()
+				sk, ok := a.skills[nameArg]
+				names := skill.Names(a.skills)
+				a.mu.RUnlock()
+				if !ok {
+					return fmt.Sprintf("未找到技能 %q，可用技能: %s", nameArg, strings.Join(names, ", ")), nil
+				}
+				logger.Infof("[agent] 加载技能: %s", sk.Name)
+				return "已加载技能「" + sk.Name + "」，请严格按以下工作流指引执行后续步骤：\n\n" + sk.Body, nil
+			}
+			continue
+		}
 		// render_chart 在 Agent 本地生成图表规格并写入结果，不转发到 MCP 后端。
 		if name == "render_chart" {
 			reg[name] = func(userID, convID string, args map[string]interface{}, result *AskResult, onProgress func(message string)) (string, error) {

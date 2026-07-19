@@ -105,12 +105,45 @@ func (s *Server) Handler() http.Handler {
 	return s.router
 }
 
-// loggingMiddleware 记录每个 HTTP 请求（方法/路径/耗时），写入运行日志。
+// loggingMiddleware 记录每个 HTTP 请求（方法/路径/耗时），写入运行日志与请求日志数据库。
 func (s *Server) loggingMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		t0 := time.Now()
 		c.Next()
-		logger.Infof("[http] %s %s 耗时=%s 来自=%s", c.Request.Method, c.Request.URL.Path, time.Since(t0), c.ClientIP())
+		latency := time.Since(t0)
+		status := c.Writer.Status()
+		method := c.Request.Method
+		path := c.Request.URL.Path
+		route := c.FullPath()
+		query := c.Request.URL.RawQuery
+		clientIP := c.ClientIP()
+		userAgent := c.Request.UserAgent()
+		logger.Infof("[http] %s %s 状态码=%d 耗时=%s 来自=%s", method, path, status, latency, clientIP)
+
+		// 异步写入请求日志数据库，便于后台按路径/用户/状态码等维度查询。
+		// 用局部变量捕获，避免 goroutine 复用 c 导致的竞态。
+		if s.users != nil {
+			var userID, username string
+			if u := s.currentUser(c); u != nil {
+				userID = u.ID
+				username = u.Username
+			}
+			go func() {
+				_ = s.users.InsertRequestLog(&userdb.RequestLog{
+					Method:    method,
+					Path:      path,
+					Route:     route,
+					Query:     query,
+					Status:    status,
+					LatencyMs: latency.Milliseconds(),
+					ClientIP:  clientIP,
+					UserAgent: userAgent,
+					UserID:    userID,
+					Username:  username,
+					CreatedAt: t0,
+				})
+			}()
+		}
 	}
 }
 

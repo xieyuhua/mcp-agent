@@ -117,6 +117,43 @@ type MCPCallLog struct {
 func (Admin) TableName() string      { return "admins" }
 func (LLMCallLog) TableName() string  { return "llm_call_logs" }
 func (MCPCallLog) TableName() string  { return "mcp_call_logs" }
+
+// RequestLog HTTP 请求日志（所有路径的调度与请求均落库，便于后台查询）。
+type RequestLog struct {
+	ID        uint      `gorm:"primaryKey;autoIncrement" json:"id"`
+	Method    string    `gorm:"size:16;index" json:"method"`
+	Path      string    `gorm:"size:512;index" json:"path"`
+	Route     string    `gorm:"size:256" json:"route,omitempty"` // 实际匹配到的路由模板，如 /api/ask
+	Query     string    `gorm:"type:text" json:"query,omitempty"`
+	Status    int       `gorm:"index" json:"status"`
+	LatencyMs int64     `json:"latency_ms"`
+	ClientIP  string    `gorm:"size:64;index" json:"client_ip"`
+	UserAgent string    `gorm:"type:text" json:"user_agent,omitempty"`
+	UserID    string    `gorm:"size:64;index" json:"user_id,omitempty"`
+	Username  string    `gorm:"size:64;index" json:"username,omitempty"`
+	Error     string    `gorm:"type:text" json:"error,omitempty"`
+	CreatedAt time.Time `gorm:"index" json:"created_at"`
+}
+
+// TableName 显式指定表名。
+func (RequestLog) TableName() string { return "request_logs" }
+
+// AgentActivityLog Agent 内部活动日志（初始化阶段与运行期的关键内部行为，
+// 不经过 HTTP 中间件，也不属于单轮对话：如 MCP 连接建立、技能加载、初始化预加载表结构等）。
+type AgentActivityLog struct {
+	ID         uint      `gorm:"primaryKey;autoIncrement" json:"id"`
+	Kind       string    `gorm:"size:32;index" json:"kind"`    // mcp_connect / skill_load / schema_load / mcp_init_call / agent_start
+	Detail     string    `gorm:"type:text" json:"detail,omitempty"`
+	Target     string    `gorm:"size:256;index" json:"target,omitempty"` // 关联对象，如 MCP 地址、技能名、表名
+	DurationMs int64     `json:"duration_ms"`
+	IsError    bool      `json:"is_error"`
+	Error      string    `gorm:"type:text" json:"error,omitempty"`
+	CreatedAt  time.Time `gorm:"index" json:"created_at"`
+}
+
+// TableName 显式指定表名。
+func (AgentActivityLog) TableName() string { return "agent_activity_logs" }
+
 type Conversation struct {
 	ID        string    `gorm:"primaryKey;size:64" json:"id"`
 	UserID    string    `gorm:"index;size:64" json:"user_id"`
@@ -153,7 +190,7 @@ func New(dbPath string) (*Store, error) {
 	if err := configurePool(db); err != nil {
 		return nil, fmt.Errorf("configure user db pool: %w", err)
 	}
-	if err := db.AutoMigrate(&User{}, &Session{}, &Role{}, &AdminRole{}, &Conversation{}, &Message{}, &Admin{}, &LLMCallLog{}, &MCPCallLog{}); err != nil {
+	if err := db.AutoMigrate(&User{}, &Session{}, &Role{}, &AdminRole{}, &Conversation{}, &Message{}, &Admin{}, &LLMCallLog{}, &MCPCallLog{}, &RequestLog{}, &AgentActivityLog{}); err != nil {
 		return nil, fmt.Errorf("migrate user db: %w", err)
 	}
 	store := &Store{db: db}
@@ -174,14 +211,14 @@ func (s *Store) seedAdminRoles() {
 		Name:        "admin",
 		DisplayName: "管理员",
 		Description: "常规管理员，可查看和修改大部分配置",
-		Permissions: "config:read,config:write,user:read,user:write,role:read,role:write,admin:read,admin_role:read,chat_log:read,llm_log:read,mcp_log:read",
+		Permissions: "config:read,config:write,user:read,user:write,role:read,role:write,admin:read,admin_role:read,chat_log:read,llm_log:read,mcp_log:read,request_log:read,activity_log:read,skill:write",
 		IsBuiltin:   true,
 	})
 	_ = s.UpsertAdminRole(&AdminRole{
 		Name:        "viewer",
 		DisplayName: "只读管理员",
 		Description: "仅可查看配置、用户和日志",
-		Permissions: "config:read,user:read,role:read,admin:read,admin_role:read,chat_log:read,llm_log:read,mcp_log:read",
+		Permissions: "config:read,user:read,role:read,admin:read,admin_role:read,chat_log:read,llm_log:read,mcp_log:read,request_log:read,activity_log:read,skill:write",
 		IsBuiltin:   true,
 	})
 }
@@ -855,6 +892,176 @@ func (s *Store) ListMCPCallLogs(f MCPLogFilter) ([]MCPLogView, int64, error) {
 	var rows []MCPLogView
 	offset := (f.Page - 1) * f.Size
 	err := query.Order("mcp_call_logs.created_at desc").Limit(f.Size).Offset(offset).Scan(&rows).Error
+	return rows, total, err
+}
+
+// ---- 请求日志（后台） ----
+
+// InsertRequestLog 写入一条 HTTP 请求日志（方法/路径/调度路由/状态码/耗时/IP/用户等）。
+func (s *Store) InsertRequestLog(log *RequestLog) error {
+	if log == nil {
+		return errors.New("request log is nil")
+	}
+	if log.CreatedAt.IsZero() {
+		log.CreatedAt = time.Now()
+	}
+	return s.db.Create(log).Error
+}
+
+// RequestLogFilter 请求日志筛选条件。
+type RequestLogFilter struct {
+	Method   string
+	Path     string
+	Route    string
+	Status   int // 0 表示不限；>0 精确匹配；<0 表示 >= -Status（如 -400 表示 4xx 及以上）
+	Username string
+	ClientIP string
+	Keyword  string
+	DateFrom string // ISO8601
+	DateTo   string // ISO8601
+	Page     int
+	Size     int
+}
+
+// RequestLogView 请求日志视图。
+type RequestLogView struct {
+	ID        uint   `json:"id"`
+	Method    string `json:"method"`
+	Path      string `json:"path"`
+	Route     string `json:"route,omitempty"`
+	Query     string `json:"query,omitempty"`
+	Status    int    `json:"status"`
+	LatencyMs int64  `json:"latency_ms"`
+	ClientIP  string `json:"client_ip"`
+	UserAgent string `json:"user_agent,omitempty"`
+	UserID    string `json:"user_id,omitempty"`
+	Username  string `json:"username,omitempty"`
+	Error     string `json:"error,omitempty"`
+	CreatedAt string `json:"created_at"`
+}
+
+// ListRequestLogs 分页查询 HTTP 请求日志（按方法/路径/路由/状态码/用户/IP/关键词/时间筛选）。
+func (s *Store) ListRequestLogs(f RequestLogFilter) ([]RequestLogView, int64, error) {
+	if f.Page < 1 {
+		f.Page = 1
+	}
+	if f.Size <= 0 || f.Size > 200 {
+		f.Size = 20
+	}
+	query := s.db.Model(&RequestLog{})
+	if f.Method != "" {
+		query = query.Where("method = ?", strings.ToUpper(f.Method))
+	}
+	if f.Path != "" {
+		query = query.Where("path LIKE ?", "%"+f.Path+"%")
+	}
+	if f.Route != "" {
+		query = query.Where("route = ?", f.Route)
+	}
+	if f.Status != 0 {
+		if f.Status > 0 {
+			query = query.Where("status = ?", f.Status)
+		} else {
+			query = query.Where("status >= ?", -f.Status)
+		}
+	}
+	if f.Username != "" {
+		query = query.Where("username LIKE ?", "%"+f.Username+"%")
+	}
+	if f.ClientIP != "" {
+		query = query.Where("client_ip LIKE ?", "%"+f.ClientIP+"%")
+	}
+	if f.Keyword != "" {
+		query = query.Where("path LIKE ? OR query LIKE ? OR user_agent LIKE ? OR error LIKE ?",
+			"%"+f.Keyword+"%", "%"+f.Keyword+"%", "%"+f.Keyword+"%", "%"+f.Keyword+"%")
+	}
+	if f.DateFrom != "" {
+		query = query.Where("created_at >= ?", f.DateFrom)
+	}
+	if f.DateTo != "" {
+		query = query.Where("created_at <= ?", f.DateTo+" 23:59:59")
+	}
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var rows []RequestLogView
+	offset := (f.Page - 1) * f.Size
+	err := query.Order("created_at desc").Limit(f.Size).Offset(offset).Scan(&rows).Error
+	return rows, total, err
+}
+
+// ---- Agent 内部活动日志（后台） ----
+
+// InsertAgentActivityLog 写入一条 Agent 内部活动日志（初始化阶段与运行期关键内部行为）。
+func (s *Store) InsertAgentActivityLog(kind, detail, target string, durationMs int64, isError bool, errMsg string) error {
+	log := &AgentActivityLog{
+		Kind:       kind,
+		Detail:     detail,
+		Target:     target,
+		DurationMs: durationMs,
+		IsError:    isError,
+		Error:      errMsg,
+		CreatedAt:  time.Now(),
+	}
+	return s.db.Create(log).Error
+}
+
+// AgentActivityLogFilter Agent 内部活动日志筛选条件。
+type AgentActivityLogFilter struct {
+	Kind     string
+	Target   string
+	Keyword  string
+	DateFrom string
+	DateTo   string
+	Page     int
+	Size     int
+}
+
+// AgentActivityLogView Agent 内部活动日志视图。
+type AgentActivityLogView struct {
+	ID         uint   `json:"id"`
+	Kind       string `json:"kind"`
+	Detail     string `json:"detail,omitempty"`
+	Target     string `json:"target,omitempty"`
+	DurationMs int64  `json:"duration_ms"`
+	IsError    bool   `json:"is_error"`
+	Error      string `json:"error,omitempty"`
+	CreatedAt  string `json:"created_at"`
+}
+
+// ListAgentActivityLogs 分页查询 Agent 内部活动日志（按类型/目标/关键词/时间筛选）。
+func (s *Store) ListAgentActivityLogs(f AgentActivityLogFilter) ([]AgentActivityLogView, int64, error) {
+	if f.Page < 1 {
+		f.Page = 1
+	}
+	if f.Size <= 0 || f.Size > 200 {
+		f.Size = 20
+	}
+	query := s.db.Model(&AgentActivityLog{})
+	if f.Kind != "" {
+		query = query.Where("kind = ?", f.Kind)
+	}
+	if f.Target != "" {
+		query = query.Where("target LIKE ?", "%"+f.Target+"%")
+	}
+	if f.Keyword != "" {
+		query = query.Where("detail LIKE ? OR target LIKE ? OR error LIKE ?",
+			"%"+f.Keyword+"%", "%"+f.Keyword+"%", "%"+f.Keyword+"%")
+	}
+	if f.DateFrom != "" {
+		query = query.Where("created_at >= ?", f.DateFrom)
+	}
+	if f.DateTo != "" {
+		query = query.Where("created_at <= ?", f.DateTo+" 23:59:59")
+	}
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var rows []AgentActivityLogView
+	offset := (f.Page - 1) * f.Size
+	err := query.Order("created_at desc").Limit(f.Size).Offset(offset).Scan(&rows).Error
 	return rows, total, err
 }
 

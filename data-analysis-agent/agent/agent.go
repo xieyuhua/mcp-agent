@@ -12,6 +12,7 @@ import (
 	"company.com/data-analysis-agent/internal/logger"
 	"company.com/data-analysis-agent/llm"
 	"company.com/data-analysis-agent/mcpclient"
+	"company.com/data-analysis-agent/skill"
 )
 
 // Agent 数据分析助手：把自然语言 -> 本地大模型 -> 生成 SQL -> MCP 权限处理 -> 查 MySQL -> 大模型分析 -> 输出。
@@ -31,6 +32,9 @@ type Agent struct {
 	// toolRegistry 工具名 -> 执行函数（picoclaw 风格的统一分发表）。
 	toolRegistry map[string]toolRunner
 
+	// skills 从 skills 目录加载的技能（name -> Skill），由 LLM 通过 use_skill 工具按需加载执行。
+	skills map[string]*skill.Skill
+
 	// mu 保护 cfg/llm/mcp/tools/schema 的热更新，避免与 Ask 并发竞争。
 	mu sync.RWMutex
 
@@ -42,6 +46,7 @@ type Agent struct {
 type CallLogStore interface {
 	InsertLLMCallLog(userID, convID, model, provider, messages, tools, response string, durationMs int64, errorMsg string) error
 	InsertMCPCallLog(userID, convID, toolName, serverName, args, result string, durationMs int64, isErr bool, errorMsg string) error
+	InsertAgentActivityLog(kind, detail, target string, durationMs int64, isError bool, errMsg string) error
 }
 
 // extraMCP 一个额外远程 MCP 连接及其元信息。
@@ -53,6 +58,17 @@ type extraMCP struct {
 // New 构造 Agent：按配置启动 MCP（本地子进程或远程服务）、登录、预加载表结构。
 func New(cfg *config.Config) (*Agent, error) {
 	a := &Agent{cfg: cfg}
+	// 加载技能目录（失败不致命，仅告警并继续；目录为空则无技能可用）。
+	skillStart := time.Now()
+	a.skills, _ = skill.LoadDir(cfg.SkillsDir)
+	skillDur := time.Since(skillStart).Milliseconds()
+	if len(a.skills) > 0 {
+		logger.Infof("[agent] 已加载 %d 个技能: %s", len(a.skills), strings.Join(skill.Names(a.skills), ", "))
+		a.logActivity("skill_load", fmt.Sprintf("加载 %d 个技能: %s", len(a.skills), strings.Join(skill.Names(a.skills), ", ")), cfg.SkillsDir, skillDur, false, "")
+	} else {
+		logger.Infof("[agent] 未加载到技能（目录=%q，将在用户调用 use_skill 时提示无可用技能）", cfg.SkillsDir)
+		a.logActivity("skill_load", "未加载到技能（目录可能为空或不存在）", cfg.SkillsDir, skillDur, false, "")
+	}
 	if err := a.initMCP(cfg); err != nil {
 		return nil, err
 	}
@@ -77,6 +93,7 @@ func (a *Agent) initMCP(cfg *config.Config) error {
 		// 本地内置 mcp-data-server 始终作为主 MCP（builtin 模式）。
 		builtin = true
 		logger.Infof("[agent] 启用本地内置 MCP 对接: %s", cfg.MCP.ServerPath)
+		connStart := time.Now()
 		mainMCP, err = mcpclient.Start(mcpclient.StartConfig{
 			ServerPath:     cfg.MCP.ServerPath,
 			DBDialect:      cfg.MCP.DBDialect,
@@ -87,13 +104,17 @@ func (a *Agent) initMCP(cfg *config.Config) error {
 			WorkDir:        cfg.MCP.WorkDir,
 			SandboxEnabled: cfg.MCP.SandboxEnabled,
 		})
+		connDur := time.Since(connStart).Milliseconds()
 		if err != nil {
+			a.logActivity("mcp_connect", "本地 MCP 子进程启动失败: "+err.Error(), cfg.MCP.ServerPath, connDur, true, err.Error())
 			return err
 		}
+		a.logActivity("mcp_connect", "本地内置 MCP 子进程启动并建立连接", cfg.MCP.ServerPath, connDur, false, "")
 	} else if remoteOn {
 		// 仅远程：远程作为主 MCP（非 builtin）。
 		builtin = false
 		logger.Infof("[agent] 仅启用远程 MCP 对接: %s (transport=%s)", cfg.MCP.BaseURL, transportName(cfg.MCP.Transport))
+		connStart := time.Now()
 		mainMCP, err = mcpclient.StartRemote(mcpclient.RemoteConfig{
 			BaseURL:   cfg.MCP.BaseURL,
 			Transport: cfg.MCP.Transport,
@@ -101,11 +122,16 @@ func (a *Agent) initMCP(cfg *config.Config) error {
 			Headers:   cfg.MCP.Headers,
 			Timeout:   30 * time.Second,
 		})
+		connDur := time.Since(connStart).Milliseconds()
 		if err != nil {
+			a.logActivity("mcp_connect", "远程 MCP 连接失败: "+err.Error(), cfg.MCP.BaseURL, connDur, true, err.Error())
 			return err
 		}
+		a.logActivity("mcp_connect", "远程 MCP 服务连接建立 (transport="+transportName(cfg.MCP.Transport)+")", cfg.MCP.BaseURL, connDur, false, "")
 	} else {
-		return fmt.Errorf("MCP 未启用：请至少开启本地或远程 MCP 之一（mcp.local_enabled / mcp.remote_enabled）")
+		err = fmt.Errorf("MCP 未启用：请至少开启本地或远程 MCP 之一（mcp.local_enabled / mcp.remote_enabled）")
+		a.logActivity("mcp_connect", err.Error(), "", 0, true, err.Error())
+		return err
 	}
 
 	a.mcp = mainMCP
@@ -115,10 +141,13 @@ func (a *Agent) initMCP(cfg *config.Config) error {
 
 	// 内置模式：登录获取 token（后续所有 MCP 工具调用都需要）
 	if builtin {
+		loginStart := time.Now()
 		if err := a.login(); err != nil {
+			a.logActivity("mcp_connect", "MCP 登录失败: "+err.Error(), a.cfg.MCP.Username, time.Since(loginStart).Milliseconds(), true, err.Error())
 			mainMCP.Close()
 			return err
 		}
+		a.logActivity("mcp_connect", "MCP 登录成功", a.cfg.MCP.Username, time.Since(loginStart).Milliseconds(), false, "")
 	}
 
 	// 连接额外对接的远程 MCP 服务（可选，多个并存）。
@@ -192,6 +221,42 @@ func (a *Agent) ApplyConfig(cfg *config.Config) error {
 	// 日志开关热更新：后台修改“保存日志到文件”即时生效，无需重启。
 	logger.SetSaveToFile(cfg.Log.SaveToFile)
 	logger.SetDir(cfg.Log.Dir)
+
+	// 技能目录变化：热重载技能（不重启进程即可生效）。
+	if cfg.SkillsDir != a.cfg.SkillsDir {
+		a.cfg.SkillsDir = cfg.SkillsDir
+		if err := a.ReloadSkills(); err != nil {
+			logger.Warnf("[agent] 技能热重载失败（目录=%s）: %v", cfg.SkillsDir, err)
+		}
+	}
+	return nil
+}
+
+// ReloadSkills 运行时热重载技能目录（无需重启进程）。
+// 重新扫描 skills 目录、更新内存中的技能表，并重建暴露给大模型的工具列表（use_skill 的
+// 可选枚举与描述随之更新）。失败不致命：保留上次成功加载的技能，仅记录告警与活动日志。
+func (a *Agent) ReloadSkills() error {
+	a.mu.Lock()
+	dir := a.cfg.SkillsDir
+	a.mu.Unlock()
+
+	start := time.Now()
+	skills, err := skill.LoadDir(dir)
+	dur := time.Since(start).Milliseconds()
+	if err != nil {
+		a.logActivity("skill_load", fmt.Sprintf("技能热重载失败（目录=%s）: %v", dir, err), dir, dur, true, err.Error())
+		return err
+	}
+	names := skill.Names(skills)
+
+	// 先释放写锁再重建工具列表（buildTools 内部会读 a.skills 并加读锁，避免死锁）。
+	a.mu.Lock()
+	a.skills = skills
+	a.mu.Unlock()
+	a.tools = a.buildTools()
+
+	logger.Infof("[agent] 技能热重载完成: 目录=%s 共 %d 个: %s", dir, len(skills), strings.Join(names, ", "))
+	a.logActivity("skill_load", fmt.Sprintf("技能热重载完成，共 %d 个: %s", len(skills), strings.Join(names, ", ")), dir, dur, false, "")
 	return nil
 }
 
@@ -430,6 +495,31 @@ func (a *Agent) buildTools() []llm.Tool {
 			})
 		}
 	}
+	// 技能：若加载了技能，则向 LLM 暴露 use_skill 工具，由模型按需加载并据其指引执行。
+	// use_skill 与既有 MCP 工具并列，不抢占任何工具名（除非用户自定义了同名技能/工具，以先注册者为准）。
+	a.mu.RLock()
+	hasSkills := len(a.skills) > 0
+	skillNames := skill.Names(a.skills)
+	skillDesc := skill.ToolDescription(a.skills)
+	a.mu.RUnlock()
+	if hasSkills {
+		tools = append(tools, llm.Tool{
+			Name:        "use_skill",
+			Description: skillDesc,
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"name": map[string]interface{}{
+						"type":        "string",
+						"description": "要加载的技能名称（必须来自下方可用技能列表）",
+						"enum":        skillNames,
+					},
+				},
+				"required": []string{"name"},
+			},
+		})
+	}
+
 	// 构建「工具名 -> 执行函数」注册表，供 executeTool 按名分发。
 	a.toolRegistry = a.buildRegistry(tools)
 	logger.Infof("[agent] 已加载 %d 个工具供 LLM 使用: %s", len(tools), toolNames(tools))
@@ -679,15 +769,27 @@ func (a *Agent) loadSchema(tables []string) string {
 	sb.WriteString("已知数据库表结构如下（如缺失可用 describe_table 工具补充）：\n")
 	found := false
 	for _, t := range tables {
+		schemaStart := time.Now()
 		text, isErr, err := a.mcp.CallTool("describe_table", map[string]interface{}{
 			"token": a.token,
 			"table": t,
 		}, nil)
-		if err != nil || isErr || text == "" {
+		schemaDur := time.Since(schemaStart).Milliseconds()
+		// 初始化阶段的 MCP 调用也写入 mcp_call_logs，便于追溯首次表结构获取；
+		// 以 user_id="system" 标记，与正常对话调用区分（convID 为空）。
+		a.logMCPCall("system", "", "describe_table", "main",
+			fmt.Sprintf("{\"token\":\"***\",\"table\":\"%s\"}", t), text, schemaDur, isErr, "")
+		if err != nil {
+			a.logActivity("schema_load", fmt.Sprintf("获取表 %s 结构失败: %v", t, err), t, schemaDur, true, err.Error())
+			continue
+		}
+		if isErr || text == "" {
+			a.logActivity("schema_load", fmt.Sprintf("获取表 %s 结构返回空或错误", t), t, schemaDur, true, "empty or error")
 			continue
 		}
 		sb.WriteString("- " + t + ": " + text + "\n")
 		found = true
+		a.logActivity("schema_load", fmt.Sprintf("获取表 %s 结构成功（长度=%d）", t, len(text)), t, schemaDur, false, "")
 	}
 	if !found {
 		return ""
@@ -826,6 +928,23 @@ func (a *Agent) UIConfig() config.UIConfig {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.cfg.UI
+}
+
+// SkillNames 返回已加载技能的名称列表（按字典序），供 REPL /skill 命令与接口展示。
+func (a *Agent) SkillNames() []string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return skill.Names(a.skills)
+}
+
+// SkillDescription 返回指定技能的描述（无该技能时返回空串）。
+func (a *Agent) SkillDescription(name string) string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if s, ok := a.skills[name]; ok {
+		return s.Description
+	}
+	return ""
 }
 
 // MemoryInfo 返回当前生效的记忆窗口配置，供 server 读取历史条数上限。
@@ -1103,7 +1222,7 @@ func (a *Agent) AskRichWithHistory(history []HistoryItem, question string, opts 
 				}
 			}
 
-			logger.Infof("[agent] 工具返回(前200): %s 耗时=%dms 结果=%s", tc.Name, time.Since(toolStart).Milliseconds(), logger.Sanitize(truncate(toolResult, 200)))
+			logger.Infof("[agent] 工具返回(前%d): %s 耗时=%dms 结果=%s", a.cfg.Agent.LogPreviewChars, tc.Name, time.Since(toolStart).Milliseconds(), logger.Sanitize(truncate(toolResult, a.cfg.Agent.LogPreviewChars)))
 			// 展示用步骤日志：保留完整结果，前端“分析过程”不再截断。
 			// 喂给 LLM 上下文的则在下方 messages 中用 truncateResult 按行数裁剪，防止上下文膨胀。
 			stepLog := StepLog{Tool: tc.Name, Args: tc.Arguments, Result: toolResult, Duration: time.Since(toolStart).Milliseconds()}
@@ -1184,6 +1303,15 @@ func (a *Agent) logMCPCall(userID, convID, toolName, serverName, args, result st
 		return
 	}
 	_ = a.callLogStore.InsertMCPCallLog(userID, convID, toolName, serverName, args, result, durationMs, isErr, errMsg)
+}
+
+// logActivity 写入 Agent 内部活动日志（初始化阶段或运行期关键内部行为，
+// 如 MCP 连接建立、技能加载、初始化预加载表结构等，不经过 HTTP 中间件也不属于单轮对话）。
+func (a *Agent) logActivity(kind, detail, target string, durationMs int64, isError bool, errMsg string) {
+	if a.callLogStore == nil {
+		return
+	}
+	_ = a.callLogStore.InsertAgentActivityLog(kind, detail, target, durationMs, isError, errMsg)
 }
 
 func getStr(m map[string]interface{}, key string) string {
@@ -1274,7 +1402,7 @@ func (a *Agent) truncateResult(text string) string {
 			return string(b)
 		}
 	}
-	return truncate(text, 8000)
+	return truncate(text, a.cfg.Agent.MaxResultChars)
 }
 
 // parseFallbackToolCall 退化模式：从模型文本中解析 ```json 工具调用块。
@@ -1312,8 +1440,11 @@ func (a *Agent) parseFallbackToolCall(resp *llm.Response, messages *[]llm.Messag
 	return newResp
 }
 
-// truncate 文本截断辅助。
+// truncate 文本截断辅助。n<=0 表示不截断（返回原文）。
 func truncate(s string, n int) string {
+	if n <= 0 {
+		return s
+	}
 	r := []rune(s)
 	if len(r) <= n {
 		return s

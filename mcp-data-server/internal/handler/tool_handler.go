@@ -83,7 +83,11 @@ func (h *ToolHandler) runSQL(ctx context.Context, args map[string]interface{}, o
 	if err != nil {
 		return nil, err
 	}
+	// 兼容模型可能使用的参数名：优先 sql，回退 query。
 	sql, _ := args["sql"].(string)
+	if sql == "" {
+		sql, _ = args["query"].(string)
+	}
 	if sql == "" {
 		return nil, fmt.Errorf("sql is required")
 	}

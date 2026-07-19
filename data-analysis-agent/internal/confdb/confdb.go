@@ -247,6 +247,10 @@ const (
 	KeyAgentMaxSteps      = "agent.max_steps"
 	KeyAgentUseNative     = "agent.use_native_tools"
 	KeyAgentMaxResultRows = "agent.max_result_rows"
+	// 工具返回字符截断上限（0=不截断）
+	KeyAgentMaxResultChars = "agent.max_result_chars"
+	// 工具返回日志预览字符上限（0=不截断）
+	KeyAgentLogPreviewChars = "agent.log_preview_chars"
 	// Agent 记忆窗口
 	KeyAgentMemMaxHistory       = "agent.memory_max_history"
 	KeyAgentMemSummaryThreshold = "agent.memory_summary_threshold"
@@ -281,6 +285,7 @@ func validKey(k string) bool {
 		KeyMCPSandbox, KeyMCPWorkDir,
 		KeyMCPUsername, KeyMCPPassword, KeyMCPRemoteEnabled, KeyMCPBaseURL, KeyMCPTransport, KeyMCPAPIKey, KeyMCPHeaders, KeyMCPExtra,
 		KeyAgentMaxSteps, KeyAgentUseNative, KeyAgentMaxResultRows,
+		KeyAgentMaxResultChars, KeyAgentLogPreviewChars,
 		KeyAgentMemMaxHistory, KeyAgentMemSummaryThreshold, KeyAgentMemRecentKeep,
 		KeyLogSaveToFile, KeyLogDir,
 		KeyPromptBuiltin, KeyPromptRemote,
@@ -326,6 +331,8 @@ func toItems(c *config.Config) []ConfigItem {
 		mk(KeyAgentMaxSteps, itoa(c.Agent.MaxSteps), "ReAct 最大推理步数"),
 		mk(KeyAgentUseNative, b(c.Agent.UseNativeTools), "是否使用原生工具调用"),
 		mk(KeyAgentMaxResultRows, itoa(c.Agent.MaxResultRows), "工具返回最大行数"),
+		mk(KeyAgentMaxResultChars, itoa(c.Agent.MaxResultChars), "工具返回字符截断上限（0=不截断，仅作用于非 JSON 行数截断场景）"),
+		mk(KeyAgentLogPreviewChars, itoa(c.Agent.LogPreviewChars), "工具返回写入日志前的预览字符上限（0=不截断）"),
 		mk(KeyAgentMemMaxHistory, itoa(c.Agent.MemoryMaxHistory), "上下文窗口：单次最多回放的历史消息条数"),
 		mk(KeyAgentMemSummaryThreshold, itoa(c.Agent.MemorySummaryThreshold), "历史消息数达到该值时触发摘要压缩"),
 		mk(KeyAgentMemRecentKeep, itoa(c.Agent.MemoryRecentKeep), "摘要压缩时保留最近 N 条原文"),
@@ -404,6 +411,10 @@ func applyItem(c *config.Config, key, value string) error {
 		c.Agent.UseNativeTools = isTrue(value)
 	case KeyAgentMaxResultRows:
 		c.Agent.MaxResultRows = atoi(value)
+	case KeyAgentMaxResultChars:
+		c.Agent.MaxResultChars = atoi(value)
+	case KeyAgentLogPreviewChars:
+		c.Agent.LogPreviewChars = atoi(value)
 	case KeyAgentMemMaxHistory:
 		c.Agent.MemoryMaxHistory = atoi(value)
 	case KeyAgentMemSummaryThreshold:
