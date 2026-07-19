@@ -46,19 +46,6 @@ func (r *RoleRepo) ListRoles(tenantID string) ([]model.Role, error) {
 	return list, err
 }
 
-// GetRoleByName 按租户+名称取角色。
-func (r *RoleRepo) GetRoleByName(tenantID, name string) (*model.Role, error) {
-	var role model.Role
-	err := r.db.Where("tenant_id = ? AND name = ?", tenantID, name).First(&role).Error
-	if err == gorm.ErrRecordNotFound {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &role, nil
-}
-
 // UpsertRole 新增或更新角色（tenant+name 唯一）。
 func (r *RoleRepo) UpsertRole(role *model.Role) error {
 	var existing model.Role
@@ -85,15 +72,4 @@ func (r *RoleRepo) DeleteRole(tenantID, name string) error {
 		Delete(&model.Role{}).Error
 }
 
-// IsBuiltin 判断某角色是否为内置角色。
-func (r *RoleRepo) IsBuiltin(tenantID, name string) (bool, error) {
-	var role model.Role
-	err := r.db.Where("tenant_id = ? AND name = ?", tenantID, name).First(&role).Error
-	if err == gorm.ErrRecordNotFound {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return role.IsBuiltin, nil
-}
+

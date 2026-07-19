@@ -2,10 +2,7 @@ package handler
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-
-	"company.com/mcp-data-server/internal/service"
 )
 
 // LlamaToolCallRequest 供 llama.cpp 网页端调用工具时的请求体。
@@ -281,10 +278,4 @@ func (l *LlamaToolHandler) CallTool(ctx context.Context, req LlamaToolCallReques
 // noopProgress 是用于 llama 兼容调用的空进度回调（非流式）。
 func noopProgress(read int, message string) {}
 
-// MarshalJSON 在需要把结果文本化时提供便利。
-func (l *LlamaToolHandler) MarshalJSON(v interface{}) string {
-	b, _ := json.Marshal(v)
-	return string(b)
-}
 
-var _ service.ProgressFunc = noopProgress

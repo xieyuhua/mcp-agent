@@ -80,13 +80,6 @@ func SetLevel(level Level) {
 	std.level = level
 }
 
-// GetLevel 返回当前日志级别。
-func GetLevel() Level {
-	std.mu.Lock()
-	defer std.mu.Unlock()
-	return std.level
-}
-
 // SetSaveToFile 运行时热更新是否写文件（不重启进程）。
 func SetSaveToFile(saveToFile bool) {
 	std.mu.Lock()

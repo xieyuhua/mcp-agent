@@ -113,11 +113,6 @@ func (r *PermissionRepo) DeleteFieldPermission(tenantID, role, table, column str
 		tenantID, role, table, column).Delete(&model.FieldPermission{}).Error
 }
 
-// DeleteFieldPermissionByRole 删除某租户+角色下的全部字段权限（用于策略级联清理）。
-func (r *PermissionRepo) DeleteFieldPermissionByRole(tenantID, role string) error {
-	return r.db.Where("tenant_id = ? AND role = ?", tenantID, role).Delete(&model.FieldPermission{}).Error
-}
-
 // --- MaskRule ---
 
 // ListMaskRules 列出某租户（含平台默认）的全部脱敏规则。

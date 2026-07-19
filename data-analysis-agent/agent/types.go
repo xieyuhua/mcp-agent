@@ -20,6 +20,7 @@ type ChartSpec struct {
 
 // StepLog 一次工具调用的执行痕迹，便于前端展示"思考过程"。
 type StepLog struct {
+	ID       string `json:"id,omitempty"`        // 工具调用 ID（对应 LLM 的 tool_call_id），并发执行时前端据此归类到独立卡片，避免输出混乱
 	Tool     string `json:"tool"`
 	Args     string `json:"args"`
 	Result   string `json:"result"`

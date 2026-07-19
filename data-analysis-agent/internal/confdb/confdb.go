@@ -59,6 +59,10 @@ func New(dbPath string, fileConfig *config.Config) (*Store, error) {
 	if err := s.seedIfEmpty(fileConfig); err != nil {
 		return nil, err
 	}
+	// 保证所有已知 key 都存在（兼容旧版数据库升级）
+	if err := s.ensureDefaults(); err != nil {
+		return nil, fmt.Errorf("ensure default config: %w", err)
+	}
 	cfg, err := s.load()
 	if err != nil {
 		return nil, err
@@ -129,6 +133,30 @@ func (s *Store) seedIfEmpty(fileConfig *config.Config) error {
 	}
 	items := toItems(seed)
 	return s.db.Create(&items).Error
+}
+
+// ensureDefaults 确保所有已知配置项在数据库中都存在（旧版升级时新增 key 自动补齐）。
+func (s *Store) ensureDefaults() error {
+	var existing int64
+	if err := s.db.Model(&ConfigItem{}).Count(&existing).Error; err != nil {
+		return err
+	}
+	if existing == 0 {
+		return nil // 空的会在 seedIfEmpty 处理
+	}
+	defaults := toItems(config.DefaultConfig())
+	for _, d := range defaults {
+		var cnt int64
+		if err := s.db.Model(&ConfigItem{}).Where("key = ?", d.Key).Count(&cnt).Error; err != nil {
+			return err
+		}
+		if cnt == 0 {
+			if err := s.db.Create(&d).Error; err != nil {
+				return fmt.Errorf("insert default config %s: %w", d.Key, err)
+			}
+		}
+	}
+	return nil
 }
 
 // load 从数据库读取全部配置项，组装为完整 *config.Config。
@@ -251,10 +279,15 @@ const (
 	KeyAgentMaxResultChars = "agent.max_result_chars"
 	// 工具返回日志预览字符上限（0=不截断）
 	KeyAgentLogPreviewChars = "agent.log_preview_chars"
+	// 同轮多个工具调用的并发执行上限（<=1 串行，>1 并发）
+	KeyAgentToolConcurrency = "agent.tool_concurrency"
 	// Agent 记忆窗口
 	KeyAgentMemMaxHistory       = "agent.memory_max_history"
 	KeyAgentMemSummaryThreshold = "agent.memory_summary_threshold"
 	KeyAgentMemRecentKeep       = "agent.memory_recent_keep"
+	// Agent 对话压缩为 skill
+	KeyAgentConvCompressTurns = "agent.conversation_compress_turns"
+	KeyAgentAutoSkillMaxKeep  = "agent.auto_skill_max_keep"
 	// Log
 	KeyLogSaveToFile = "log.save_to_file"
 	KeyLogDir        = "log.dir"
@@ -273,6 +306,8 @@ const (
 	KeyUIChatPageSize  = "ui.chat_page_size"
 	KeyUIPhoneRequired = "ui.phone_required"
 	KeyUIPhoneVerify   = "ui.phone_verify_required"
+	// UI 默认问题
+	KeyUISampleQuestions = "ui.sample_questions"
 	// Admin 后台登录凭据
 	KeyAdminUser = "admin.username"
 	KeyAdminPass = "admin.password"
@@ -285,13 +320,14 @@ func validKey(k string) bool {
 		KeyMCPSandbox, KeyMCPWorkDir,
 		KeyMCPUsername, KeyMCPPassword, KeyMCPRemoteEnabled, KeyMCPBaseURL, KeyMCPTransport, KeyMCPAPIKey, KeyMCPHeaders, KeyMCPExtra,
 		KeyAgentMaxSteps, KeyAgentUseNative, KeyAgentMaxResultRows,
-		KeyAgentMaxResultChars, KeyAgentLogPreviewChars,
+		KeyAgentMaxResultChars, KeyAgentLogPreviewChars, KeyAgentToolConcurrency,
 		KeyAgentMemMaxHistory, KeyAgentMemSummaryThreshold, KeyAgentMemRecentKeep,
+		KeyAgentConvCompressTurns, KeyAgentAutoSkillMaxKeep,
 		KeyLogSaveToFile, KeyLogDir,
 		KeyPromptBuiltin, KeyPromptRemote,
 		KeyUIShowDuration, KeyUIShowSteps, KeyUIShowImages,
 		KeyUITheme, KeyUIAppTitle, KeyUIAppSubtitle, KeyUIWorkflow,
-		KeyUIAdminPageSize, KeyUIChatPageSize, KeyUIPhoneRequired, KeyUIPhoneVerify,
+		KeyUIAdminPageSize, KeyUIChatPageSize, KeyUIPhoneRequired, KeyUIPhoneVerify, KeyUISampleQuestions,
 		KeyAdminUser, KeyAdminPass:
 		return true
 	}
@@ -333,9 +369,12 @@ func toItems(c *config.Config) []ConfigItem {
 		mk(KeyAgentMaxResultRows, itoa(c.Agent.MaxResultRows), "工具返回最大行数"),
 		mk(KeyAgentMaxResultChars, itoa(c.Agent.MaxResultChars), "工具返回字符截断上限（0=不截断，仅作用于非 JSON 行数截断场景）"),
 		mk(KeyAgentLogPreviewChars, itoa(c.Agent.LogPreviewChars), "工具返回写入日志前的预览字符上限（0=不截断）"),
+		mk(KeyAgentToolConcurrency, itoa(c.Agent.ToolConcurrency), "同轮多个工具调用并发执行上限（<=1 串行，>1 并发）"),
 		mk(KeyAgentMemMaxHistory, itoa(c.Agent.MemoryMaxHistory), "上下文窗口：单次最多回放的历史消息条数"),
 		mk(KeyAgentMemSummaryThreshold, itoa(c.Agent.MemorySummaryThreshold), "历史消息数达到该值时触发摘要压缩"),
 		mk(KeyAgentMemRecentKeep, itoa(c.Agent.MemoryRecentKeep), "摘要压缩时保留最近 N 条原文"),
+		mk(KeyAgentConvCompressTurns, itoa(c.Agent.ConversationCompressTurns), "对话轮次达该值时自动压缩为 skill（0=关闭）"),
+		mk(KeyAgentAutoSkillMaxKeep, itoa(c.Agent.AutoSkillMaxKeep), "自动生成的 skill 文件最多保留多少个（0=不限制）"),
 		mk(KeyLogSaveToFile, b(c.Log.SaveToFile), "是否把每个环节的请求日志保存到文件"),
 		mk(KeyLogDir, c.Log.Dir, "日志文件目录（默认 logs）"),
 		mk(KeyPromptBuiltin, c.Prompts.Builtin, "内置数据库分析场景系统提示词"),
@@ -351,6 +390,7 @@ func toItems(c *config.Config) []ConfigItem {
 		mk(KeyUIChatPageSize, itoa(c.UI.ChatPageSize), "前端聊天消息分页默认大小"),
 		mk(KeyUIPhoneRequired, b(c.UI.PhoneRequired), "注册是否强制填写手机号"),
 		mk(KeyUIPhoneVerify, b(c.UI.PhoneVerifyRequired), "是否强制手机号验证（当前格式校验）"),
+		mk(KeyUISampleQuestions, c.UI.SampleQuestions, "前端示例问题列表（JSON 字符串数组，如 [\"问题1\",\"问题2\"]）"),
 		mk(KeyAdminUser, "admin", "后台管理登录账号"),
 		mk(KeyAdminPass, "admin123", "后台管理登录密码"),
 	}
@@ -415,12 +455,18 @@ func applyItem(c *config.Config, key, value string) error {
 		c.Agent.MaxResultChars = atoi(value)
 	case KeyAgentLogPreviewChars:
 		c.Agent.LogPreviewChars = atoi(value)
+	case KeyAgentToolConcurrency:
+		c.Agent.ToolConcurrency = atoi(value)
 	case KeyAgentMemMaxHistory:
 		c.Agent.MemoryMaxHistory = atoi(value)
 	case KeyAgentMemSummaryThreshold:
 		c.Agent.MemorySummaryThreshold = atoi(value)
 	case KeyAgentMemRecentKeep:
 		c.Agent.MemoryRecentKeep = atoi(value)
+	case KeyAgentConvCompressTurns:
+		c.Agent.ConversationCompressTurns = atoi(value)
+	case KeyAgentAutoSkillMaxKeep:
+		c.Agent.AutoSkillMaxKeep = atoi(value)
 	case KeyLogSaveToFile:
 		c.Log.SaveToFile = isTrue(value)
 	case KeyLogDir:
@@ -451,6 +497,8 @@ func applyItem(c *config.Config, key, value string) error {
 		c.UI.PhoneRequired = isTrue(value)
 	case KeyUIPhoneVerify:
 		c.UI.PhoneVerifyRequired = isTrue(value)
+	case KeyUISampleQuestions:
+		c.UI.SampleQuestions = value
 	case KeyAdminUser:
 		// admin.username 仅用于登录鉴权，不进入运行配置。
 	case KeyAdminPass:
@@ -523,8 +571,4 @@ func itoa(v int) string     { return strconv.Itoa(v) }
 func atof(s string) float64 { v, _ := strconv.ParseFloat(s, 64); return v }
 func atoi(s string) int     { v, _ := strconv.Atoi(s); return v }
 
-// MarshalConfig 将配置序列化为 JSON（用于调试/导出）。
-func MarshalConfig(c *config.Config) (string, error) {
-	b, err := json.MarshalIndent(c, "", "  ")
-	return string(b), err
-}
+

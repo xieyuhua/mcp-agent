@@ -19,7 +19,8 @@ const routes = [
       { path: 'admin-roles', name: 'AdminRoles', component: () => import('./views/AdminRoles.vue') },
       { path: 'config', name: 'Config', component: () => import('./views/Config.vue') },
       { path: 'prompts', name: 'Prompts', component: () => import('./views/Prompts.vue') },
-      { path: 'logs', name: 'Logs', component: () => import('./views/Logs.vue') }
+      { path: 'logs', name: 'Logs', component: () => import('./views/Logs.vue') },
+      { path: 'skills', name: 'Skills', component: () => import('./views/Skills.vue') }
     ]
   }
 ]

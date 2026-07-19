@@ -57,6 +57,8 @@ type UIConfig struct {
 	PhoneRequired bool `json:"phone_required"`
 	// PhoneVerifyRequired 是否强制手机号验证（当前为格式校验，后续可接入短信）。
 	PhoneVerifyRequired bool `json:"phone_verify_required"`
+	// SampleQuestions 前端"试试以下问题"列表（JSON 字符串数组，后台可编辑）。
+	SampleQuestions string `json:"sample_questions"`
 }
 
 // LogConfig 运行日志配置。
@@ -177,12 +179,21 @@ type AgentConfig struct {
 	// LogPreviewChars 工具返回写入日志前的预览字符上限。
 	// 0 表示不截断（默认，记录完整结果）；>0 时仅预览前 N 个字符。
 	LogPreviewChars int `json:"log_preview_chars"`
+	// ToolConcurrency 同一轮 LLM 返回多个工具调用时的并发执行上限。
+	// <=1 表示串行执行（默认，行为与旧版一致）；>1 时并发执行所有工具，全部完成后统一回灌模型。
+	ToolConcurrency int `json:"tool_concurrency"`
 	// MemoryMaxHistory 单次最多回放的历史消息条数（上下文窗口），超出仅取最近部分。
 	MemoryMaxHistory int `json:"memory_max_history"`
 	// MemorySummaryThreshold 历史消息数达到该值时，对早期消息做摘要压缩。
 	MemorySummaryThreshold int `json:"memory_summary_threshold"`
 	// MemoryRecentKeep 摘要压缩时保留最近 N 条原文（其余早期消息被压缩为 summary）。
 	MemoryRecentKeep int `json:"memory_recent_keep"`
+	// ConversationCompressTurns 对话轮次达到该值时，自动将整段对话压缩为 skill 文件，
+	// 供后续 agent 通过 use_skill 工具自主复用。0 表示关闭（默认）。
+	ConversationCompressTurns int `json:"conversation_compress_turns"`
+	// AutoSkillMaxKeep 自动生成的 skill 文件最多保留多少个，超出则删除最旧的。
+	// 仅在 conversation_compress_turns > 0 时生效。0 表示不限制。
+	AutoSkillMaxKeep int `json:"auto_skill_max_keep"`
 }
 
 // Load 加载配置：文件 + 环境变量覆盖（CONFIG_FILE）。
@@ -301,14 +312,17 @@ func DefaultConfig() *Config {
 			SandboxEnabled: true, // 默认启用沙箱，文件工具只能访问 WorkDir 内
 		},
 		Agent: AgentConfig{
-			MaxSteps:               8,
-			UseNativeTools:         false,
-			MaxResultRows:          200,
-			MaxResultChars:         0, // 0=不截断
-			LogPreviewChars:        0, // 0=不截断
-			MemoryMaxHistory:       30,
-			MemorySummaryThreshold: 12,
-			MemoryRecentKeep:       6,
+			MaxSteps:                   8,
+			UseNativeTools:             false,
+			MaxResultRows:              200,
+			MaxResultChars:             0, // 0=不截断
+			LogPreviewChars:            0, // 0=不截断
+			ToolConcurrency:            1, // <=1 串行（默认）；>1 并发执行同轮多个工具调用
+			MemoryMaxHistory:           30,
+			MemorySummaryThreshold:     12,
+			MemoryRecentKeep:           6,
+			ConversationCompressTurns:  0,  // 0=关闭
+			AutoSkillMaxKeep:           20, // 自动 skill 最多保留 20 个
 		},
 		Log: LogConfig{
 			SaveToFile: false,
@@ -328,7 +342,8 @@ func DefaultConfig() *Config {
 			WorkflowSteps: "自然语言 → LLM → MCP 权限 → SQL → 图表分析",
 			AdminPageSize: 20,
 			ChatPageSize:  50,
-			PhoneRequired: true,
+			PhoneRequired:    true,
+		SampleQuestions: `["各状态订单的数量和金额分布如何？","按客户统计下单总金额 Top 5","最近的订单金额趋势","付费订单占比是多少？"]`,
 		},
 		SkillsDir: "skills",
 	}

@@ -31,7 +31,6 @@ func main() {
 	verbose := flag.Bool("v", false, "CLI 模式下打印 Info 级日志（默认只显示 Warn/Error）")
 	debug := flag.Bool("vv", false, "CLI 模式下打印 Debug 级日志（含完整 prompt/tools 等）")
 	addr := flag.String("addr", ":8088", "HTTP 监听地址")
-	staticDir := flag.String("static", "web/dist", "前端静态资源目录（前端 build 产物）")
 	skillsDir := flag.String("skills", "", "技能目录（默认 skills），留空沿用配置")
 	flag.Parse()
 
@@ -95,7 +94,19 @@ func main() {
 	fmt.Printf("日志文件: %s（%s）\n", effCfg.Log.Dir,
 		map[bool]string{true: "已开启保存到文件", false: "仅控制台"}[effCfg.Log.SaveToFile])
 
-	ag, err := agent.New(effCfg)
+	// HTTP 服务模式下需先打开用户数据库，再将 callLogStore 注入 agent.New
+	// 使初始化阶段（MCP 连接、技能加载、预加载表结构）的活动日志能被捕获。
+	var users *userdb.Store
+	if *serve {
+		var err error
+		users, err = userdb.New(*userDBPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "打开用户数据库失败: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	ag, err := agent.New(effCfg, users)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "启动失败: %v\n", err)
 		os.Exit(1)
@@ -108,24 +119,9 @@ func main() {
 
 	// HTTP 服务模式：供前端调用
 	if *serve {
-		users, err := userdb.New(*userDBPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "打开用户数据库失败: %v\n", err)
-			os.Exit(1)
-		}
-		// 必须在 agent.New 之前注入调用日志存储，以捕获初始化阶段（MCP 连接、
-		// 技能加载、预加载表结构）的内部活动日志。
-		ag.SetCallLogStore(users)
-		// 重新构造 Agent，使初始化阶段日志能被捕获（callLogStore 已就绪）。
-		ag.Close()
-		ag, err = agent.New(effCfg)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "启动失败: %v\n", err)
-			os.Exit(1)
-		}
 		ag.SetCallLogStore(users)
 		adminSvc = admin.New(store, users, ag)
-		srv := server.New(ag, users, *staticDir, adminSvc.Handler())
+		srv := server.New(ag, users, adminSvc.Handler())
 		if err := srv.Run(*addr); err != nil {
 			fmt.Fprintf(os.Stderr, "HTTP 服务异常: %v\n", err)
 			os.Exit(1)

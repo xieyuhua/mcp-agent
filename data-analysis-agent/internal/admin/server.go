@@ -7,9 +7,12 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +22,7 @@ import (
 	"company.com/data-analysis-agent/internal/confdb"
 	"company.com/data-analysis-agent/internal/userdb"
 	"company.com/data-analysis-agent/mcpclient"
+	"company.com/data-analysis-agent/skill"
 
 	"github.com/gin-gonic/gin"
 )
@@ -44,7 +48,9 @@ var AdminPermissions = []Permission{
 	{Code: "mcp_log:read", Name: "MCP 日志查看", Module: "日志管理"},
 	{Code: "request_log:read", Name: "请求日志查看", Module: "日志管理"},
 	{Code: "activity_log:read", Name: "内部活动日志查看", Module: "日志管理"},
-	{Code: "skill:write", Name: "技能热重载", Module: "技能管理"},
+	{Code: "skill:read", Name: "技能查看", Module: "技能管理"},
+	{Code: "skill:write", Name: "技能新增/编辑/重载", Module: "技能管理"},
+	{Code: "skill:delete", Name: "技能删除", Module: "技能管理"},
 }
 
 // Permission 描述一项可分配的权限。
@@ -136,6 +142,11 @@ func (s *Server) buildRouter() *gin.Engine {
 		api.GET("/mcp-logs", s.requireAuth(), s.requirePerm("mcp_log:read"), s.handleMCPLogs)
 		api.GET("/request-logs", s.requireAuth(), s.requirePerm("request_log:read"), s.handleRequestLogs)
 		api.GET("/activity-logs", s.requireAuth(), s.requirePerm("activity_log:read"), s.handleActivityLogs)
+		api.GET("/skills", s.requireAuth(), s.requirePerm("skill:read"), s.handleListSkills)
+		api.GET("/skills/:name", s.requireAuth(), s.requirePerm("skill:read"), s.handleGetSkill)
+		api.POST("/skills", s.requireAuth(), s.requirePerm("skill:write"), s.handleCreateSkill)
+		api.PUT("/skills/:name", s.requireAuth(), s.requirePerm("skill:write"), s.handleUpdateSkill)
+		api.DELETE("/skills/:name", s.requireAuth(), s.requirePerm("skill:delete"), s.handleDeleteSkill)
 		api.POST("/reload-skills", s.requireAuth(), s.requirePerm("skill:write"), s.handleReloadSkills)
 	}
 
@@ -443,17 +454,26 @@ func (s *Server) handleConfig(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"items": items})
 	case http.MethodPut:
 		var req struct {
-			Values map[string]string `json:"values"`
+			Values map[string]interface{} `json:"values"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "请求体解析失败"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "请求体解析失败: " + err.Error()})
 			return
 		}
 		if len(req.Values) == 0 {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "values 不能为空"})
 			return
 		}
-		if err := s.store.Update(req.Values); err != nil {
+		// 容错：前端可能发送 number/bool 值，统一转为 string
+		norm := make(map[string]string, len(req.Values))
+		for k, v := range req.Values {
+			if v == nil {
+				norm[k] = ""
+			} else {
+				norm[k] = fmt.Sprint(v)
+			}
+		}
+		if err := s.store.Update(norm); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
@@ -897,6 +917,145 @@ func (s *Server) handleActivityLogs(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"logs": list, "total": total, "page": page, "size": size})
+}
+
+// handleListSkills 返回当前已加载技能列表（无需重载）。
+func (s *Server) handleListSkills(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"skills": s.ag.SkillNames()})
+}
+
+// skillFilePath 返回技能文件在磁盘上的完整路径。先检查 name.md，再检查 name+normalized-name.md。
+func (s *Server) skillFilePath(name string) string {
+	dir := s.ag.SkillsDir()
+	for _, ext := range []string{".md", ".MD"} {
+		p := filepath.Join(dir, name+ext)
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
+// handleGetSkill 返回指定技能的名称、描述与正文（不含 frontmatter 分隔符）。
+func (s *Server) handleGetSkill(c *gin.Context) {
+	name := c.Param("name")
+	sc := s.ag.SkillContent(name)
+	if sc == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "技能不存在: " + name})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"name":        sc.Name,
+		"description": sc.Description,
+		"body":        sc.Body,
+	})
+}
+
+// handleCreateSkill 创建新技能文件并重载。
+func (s *Server) handleCreateSkill(c *gin.Context) {
+	var req struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Body        string `json:"body"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求体解析失败: " + err.Error()})
+		return
+	}
+	if req.Name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "技能名称不能为空"})
+		return
+	}
+	if s.ag.SkillContent(req.Name) != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "同名技能已存在: " + req.Name})
+		return
+	}
+	dir := s.ag.SkillsDir()
+	content := fmt.Sprintf("---\nname: %s\ndescription: %s\n---\n\n%s", req.Name, req.Description, req.Body)
+	// 校验技能格式
+	if _, err := skill.Parse(content); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "技能格式无效: " + err.Error()})
+		return
+	}
+	if err := os.WriteFile(filepath.Join(dir, req.Name+".md"), []byte(content), 0644); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "写入技能文件失败: " + err.Error()})
+		return
+	}
+	if err := s.ag.ReloadSkills(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "技能已创建但重载失败: " + err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "skills": s.ag.SkillNames()})
+}
+
+// handleUpdateSkill 更新技能文件并重载。
+func (s *Server) handleUpdateSkill(c *gin.Context) {
+	name := c.Param("name")
+	var req struct {
+		Description string `json:"description"`
+		Body        string `json:"body"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求体解析失败: " + err.Error()})
+		return
+	}
+	sc := s.ag.SkillContent(name)
+	if sc == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "技能不存在: " + name})
+		return
+	}
+	desc := req.Description
+	if desc == "" {
+		desc = sc.Description
+	}
+	body := req.Body
+	if body == "" {
+		body = sc.Body
+	}
+	content := fmt.Sprintf("---\nname: %s\ndescription: %s\n---\n\n%s", name, desc, body)
+	if _, err := skill.Parse(content); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "技能格式无效: " + err.Error()})
+		return
+	}
+	fp := s.skillFilePath(name)
+	if fp == "" {
+		// 文件不存在，用 name.md 创建
+		dir := s.ag.SkillsDir()
+		fp = filepath.Join(dir, name+".md")
+	}
+	if err := os.WriteFile(fp, []byte(content), 0644); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "写入技能文件失败: " + err.Error()})
+		return
+	}
+	if err := s.ag.ReloadSkills(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "技能已更新但重载失败: " + err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "skills": s.ag.SkillNames()})
+}
+
+// handleDeleteSkill 删除技能文件并重载。
+func (s *Server) handleDeleteSkill(c *gin.Context) {
+	name := c.Param("name")
+	sc := s.ag.SkillContent(name)
+	if sc == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "技能不存在: " + name})
+		return
+	}
+	fp := s.skillFilePath(name)
+	if fp == "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "未找到技能文件: " + name})
+		return
+	}
+	if err := os.Remove(fp); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "删除技能文件失败: " + err.Error()})
+		return
+	}
+	if err := s.ag.ReloadSkills(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "技能已删除但重载失败: " + err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "skills": s.ag.SkillNames()})
 }
 
 // handleReloadSkills 运行时热重载技能目录（无需重启进程）。

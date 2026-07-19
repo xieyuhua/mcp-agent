@@ -1,8 +1,6 @@
 package model
 
 import (
-	"encoding/json"
-	"fmt"
 	"time"
 )
 
@@ -57,77 +55,6 @@ func ParseHiddenFieldsMap(rules []FieldPermission) map[string]map[string]bool {
 		out[r.TableName][r.Column] = r.Hidden
 	}
 	return out
-}
-
-// HiddenFieldsJSON 用于在 PermissionPolicy 的 JSON 表示中展示隐藏字段。
-// 返回 table -> []column 的 map（只包含 hidden=true 的列）。
-func HiddenFieldsJSON(rules []FieldPermission) map[string][]string {
-	m := ParseHiddenFieldsMap(rules)
-	out := map[string][]string{}
-	for t, cols := range m {
-		for c, hidden := range cols {
-			if hidden {
-				out[t] = append(out[t], c)
-			}
-		}
-	}
-	return out
-}
-
-// TableNames 返回规则涉及的所有表名（去重）。
-func TableNames(rules []FieldPermission) []string {
-	seen := map[string]bool{}
-	for _, r := range rules {
-		seen[r.TableName] = true
-	}
-	out := make([]string, 0, len(seen))
-	for t := range seen {
-		out = append(out, t)
-	}
-	return out
-}
-
-// FieldPermissionsFromJSON 解析 {"table":["col1","col2"]} 格式的 JSON 为字段权限记录列表。
-// 用于批量导入/导出，保留 JSON 字段顺序。
-func FieldPermissionsFromJSON(tenantID, role, updatedBy string, raw []byte) ([]FieldPermission, error) {
-	if len(raw) == 0 {
-		return nil, nil
-	}
-	var m map[string][]string
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return nil, fmt.Errorf("invalid hidden_fields json: %w", err)
-	}
-	now := time.Now()
-	out := make([]FieldPermission, 0, 32)
-	for t, cols := range m {
-		for _, c := range cols {
-			c = cleanIdent(c)
-			if t == "" || c == "" {
-				continue
-			}
-			out = append(out, FieldPermission{
-				TenantID:  tenantID,
-				Role:      role,
-				TableName: t,
-				Column:    c,
-				Hidden:    true,
-				UpdatedBy: updatedBy,
-				UpdatedAt: now,
-			})
-		}
-	}
-	return out, nil
-}
-
-func cleanIdent(s string) string {
-	// 仅保留合法标识符字符，防止注入
-	b := make([]byte, 0, len(s))
-	for _, ch := range s {
-		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' {
-			b = append(b, byte(ch))
-		}
-	}
-	return string(b)
 }
 
 // Role 动态角色定义（super_admin 可在后台新增/修改）。

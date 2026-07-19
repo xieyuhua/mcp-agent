@@ -71,6 +71,8 @@ const META = {
   'agent.memory_max_history': { label: '上下文窗口(条)', type: 'number' },
   'agent.memory_summary_threshold': { label: '触发摘要阈值(条)', type: 'number' },
   'agent.memory_recent_keep': { label: '保留最近原文(条)', type: 'number' },
+  'agent.conversation_compress_turns': { label: '对话压缩轮次(0=关闭)', type: 'number', desc: '对话轮次达到该值时自动压缩为 skill，供后续 agent 通过 use_skill 自主复用' },
+  'agent.auto_skill_max_keep': { label: '自动 skill 保留数(0=不限制)', type: 'number', desc: '自动生成的 skill 文件最多保留多少个，超出则删除最旧的' },
   'log.save_to_file': { label: '日志落盘', type: 'bool' },
   'log.dir': { label: '日志目录', type: 'text' },
   'prompts.builtin': { label: '内置场景提示词', type: 'textarea' },
@@ -84,6 +86,7 @@ const META = {
   'ui.workflow_steps': { label: '流程步骤文案', type: 'text' },
   'ui.admin_page_size': { label: '后台分页大小', type: 'number' },
   'ui.chat_page_size': { label: '聊天分页大小', type: 'number' },
+  'ui.sample_questions': { label: '示例问题列表', type: 'textarea', desc: 'JSON 字符串数组，前端 "试试以下问题" 展示，如 ["问题1","问题2"]' },
   'ui.phone_required': { label: '强制手机号', type: 'bool' },
   'ui.phone_verify_required': { label: '强制手机验证', type: 'bool' },
   'admin.username': { label: '登录账号', type: 'text' }
@@ -137,7 +140,7 @@ async function save() {
   error.value = ''
   try {
     const values = {}
-    for (const item of items.value) values[item.key] = item.value
+    for (const item of items.value) values[item.key] = String(item.value ?? '')
     await config.save(values)
     saved.value = true
     setTimeout(() => saved.value = false, 2000)

@@ -1,0 +1,88 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* --- Dark theme (default) --- */
+:root, [data-theme="dark"] {
+  --bg: #0f1115;
+  --panel: #171a21;
+  --panel2: #1e222b;
+  --border: #2a2f3a;
+  --text: #e6e9ef;
+  --text-dim: #9aa3b2;
+  --accent: #4f8cff;
+  --accent2: #7c5cff;
+  --user-bubble: #2b5cff;
+  --ok: #2ec27e;
+  --warn: #ffb020;
+  --err: #ff6b6b;
+  --primary: #4f8cff;
+  --primary2: #7c5cff;
+  --muted: #9aa3b2;
+  --radius: 8px;
+}
+
+/* --- Light theme --- */
+[data-theme="light"] {
+  --bg: #f5f6fa;
+  --panel: #ffffff;
+  --panel2: #f0f1f5;
+  --border: #e0e2e8;
+  --text: #1a1d26;
+  --text-dim: #6b7280;
+  --accent: #4f8cff;
+  --accent2: #7c5cff;
+  --user-bubble: #4f8cff;
+  --ok: #2ec27e;
+  --warn: #ffb020;
+  --err: #ff6b6b;
+  --primary: #4f8cff;
+  --primary2: #7c5cff;
+  --muted: #6b7280;
+  --radius: 8px;
+}
+
+/* --- Auto theme (follows system) --- */
+[data-theme="auto"] {
+  --bg: #0f1115;
+  --panel: #171a21;
+  --panel2: #1e222b;
+  --border: #2a2f3a;
+  --text: #e6e9ef;
+  --text-dim: #9aa3b2;
+  --accent: #4f8cff;
+  --accent2: #7c5cff;
+  --user-bubble: #2b5cff;
+  --ok: #2ec27e;
+  --warn: #ffb020;
+  --err: #ff6b6b;
+  --primary: #4f8cff;
+  --primary2: #7c5cff;
+  --muted: #9aa3b2;
+  --radius: 8px;
+}
+@media (prefers-color-scheme: light) {
+  [data-theme="auto"] {
+    --bg: #f5f6fa;
+    --panel: #ffffff;
+    --panel2: #f0f1f5;
+    --border: #e0e2e8;
+    --text: #1a1d26;
+    --text-dim: #6b7280;
+    --accent: #4f8cff;
+    --accent2: #7c5cff;
+    --user-bubble: #4f8cff;
+    --ok: #2ec27e;
+    --warn: #ffb020;
+    --err: #ff6b6b;
+    --primary: #4f8cff;
+    --primary2: #7c5cff;
+    --muted: #6b7280;
+    --radius: 8px;
+  }
+}
+
+html, body, #app { height: 100%; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; background: var(--bg); color: var(--text); }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: #333a47; border-radius: 4px; }
+[data-theme="light"] ::-webkit-scrollbar-thumb, [data-theme="auto"] ::-webkit-scrollbar-thumb { background: #d0d2d8; }
+a { color: var(--accent); cursor: pointer; }

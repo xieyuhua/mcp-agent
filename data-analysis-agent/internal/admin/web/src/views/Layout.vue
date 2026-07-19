@@ -32,7 +32,8 @@ const menu = [
   { path: '/admin-roles', icon: '🔑', name: 'AdminRoles', label: '权限角色' },
   { path: '/config', icon: '⚙️', name: 'Config', label: '系统配置' },
   { path: '/prompts', icon: '💡', name: 'Prompts', label: '提示词管理' },
-  { path: '/logs', icon: '📄', name: 'Logs', label: '日志管理' }
+  { path: '/logs', icon: '📄', name: 'Logs', label: '日志管理' },
+  { path: '/skills', icon: '🛠️', name: 'Skills', label: '技能管理' }
 ]
 
 onMounted(async () => {

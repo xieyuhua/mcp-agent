@@ -5,14 +5,16 @@ import { logs } from '../api'
 const tabs = [
   { key: 'chat', label: '沟通日志' },
   { key: 'llm', label: 'LLM 日志' },
-  { key: 'mcp', label: 'MCP 日志' }
+  { key: 'mcp', label: 'MCP 日志' },
+  { key: 'request', label: '请求日志' },
+  { key: 'activity', label: '活动日志' }
 ]
 const active = ref('chat')
 const list = ref([])
 const total = ref(0)
 const page = ref(1)
 const size = ref(10)
-const filters = ref({ username: '', keyword: '', tool_name: '', model: '', date_from: '', date_to: '' })
+const filters = ref({ username: '', keyword: '', tool_name: '', model: '', status: '', method: '', route: '', path: '', kind: '', client_ip: '', date_from: '', date_to: '' })
 const loading = ref(false)
 // 全文弹窗：内容过长时点击单元格弹出完整内容，点击空白遮罩关闭。
 const detail = ref(null)
@@ -45,11 +47,20 @@ async function load() {
     if (filters.value.date_to) params.date_to = filters.value.date_to
     if (active.value === 'mcp' && filters.value.tool_name) params.tool_name = filters.value.tool_name
     if (active.value === 'llm' && filters.value.model) params.model = filters.value.model
+    if (active.value === 'request') {
+      if (filters.value.method) params.method = filters.value.method
+      if (filters.value.route) params.route = filters.value.route
+      if (filters.value.status) params.status = filters.value.status
+      if (filters.value.client_ip) params.client_ip = filters.value.client_ip
+    }
+    if (active.value === 'activity' && filters.value.kind) params.kind = filters.value.kind
 
     let res
     if (active.value === 'chat') res = await logs.chat(params)
     else if (active.value === 'llm') res = await logs.llm(params)
-    else res = await logs.mcp(params)
+    else if (active.value === 'mcp') res = await logs.mcp(params)
+    else if (active.value === 'request') res = await logs.request(params)
+    else res = await logs.activity(params)
     list.value = res.logs
     total.value = res.total
   } finally {
@@ -74,9 +85,14 @@ function changePage(p) {
 
     <div class="card toolbar">
       <input v-model="filters.username" placeholder="用户名" />
-      <input v-model="filters.keyword" placeholder="关键词" />
+      <input v-if="active === 'request'" v-model="filters.client_ip" placeholder="IP" />
+      <input v-if="active === 'request'" v-model="filters.route" placeholder="路由" />
+      <input v-if="active === 'request'" v-model="filters.method" placeholder="请求方法" />
+      <input v-if="active === 'request'" v-model="filters.status" placeholder="状态码" />
       <input v-if="active === 'mcp'" v-model="filters.tool_name" placeholder="工具名" />
       <input v-if="active === 'llm'" v-model="filters.model" placeholder="模型" />
+      <input v-if="active === 'activity'" v-model="filters.kind" placeholder="活动类型" />
+      <input v-model="filters.keyword" placeholder="关键词" />
       <input v-model="filters.date_from" type="date" />
       <input v-model="filters.date_to" type="date" />
       <button class="primary" @click="page = 1; load()">查询</button>
@@ -91,7 +107,12 @@ function changePage(p) {
               <th>用户</th>
               <th v-if="active === 'llm'">模型</th>
               <th v-if="active === 'mcp'">工具</th>
-              <th v-if="active === 'llm' || active === 'mcp'">耗时</th>
+              <th v-if="active === 'request'">方法</th>
+              <th v-if="active === 'request'">路径</th>
+              <th v-if="active === 'request'">状态</th>
+              <th v-if="active === 'activity'">类型</th>
+              <th v-if="active === 'activity'">目标</th>
+              <th v-if="active === 'llm' || active === 'mcp' || active === 'request'">耗时</th>
               <th>内容 / 结果</th>
               <th>时间</th>
             </tr>
@@ -100,18 +121,25 @@ function changePage(p) {
             <tr v-for="item in list" :key="item.id">
               <td>{{ item.id }}</td>
               <td>{{ item.username || '-' }}</td>
-              <td v-if="active === 'llm'">{{ item.model }}</td>
-              <td v-if="active === 'mcp'">{{ item.tool_name }}</td>
-              <td v-if="active === 'llm' || active === 'mcp'">{{ formatDuration(item.duration_ms) }}</td>
+              <td v-if="active === 'llm'">{{ item.model || '-' }}</td>
+              <td v-if="active === 'mcp'">{{ item.tool_name || '-' }}</td>
+              <td v-if="active === 'request'">{{ item.method || '-' }}</td>
+              <td v-if="active === 'request'">{{ item.path || '-' }}</td>
+              <td v-if="active === 'request'">
+                <span :class="item.status >= 400 ? 'status-err' : (item.status >= 300 ? 'status-warn' : 'status-ok')">{{ item.status }}</span>
+              </td>
+              <td v-if="active === 'activity'">{{ item.kind || '-' }}</td>
+              <td v-if="active === 'activity'">{{ item.target || '-' }}</td>
+              <td v-if="active === 'llm' || active === 'mcp' || active === 'request'">{{ formatDuration(item.duration_ms) }}</td>
               <td>
                 <div class="cell-preview" title="点击查看完整内容" @click="openDetail(item)">
-                  {{ item.content || item.response || item.result || '-' }}
+                  {{ item.content || item.response || item.result || item.detail || '-' }}
                 </div>
               </td>
               <td>{{ item.created_at }}</td>
             </tr>
             <tr v-if="!list.length">
-              <td :colspan="active === 'chat' ? 4 : 6" class="empty">暂无数据</td>
+              <td :colspan="active === 'chat' ? 4 : (active === 'request' ? 9 : (active === 'activity' ? 7 : 6))" class="empty">暂无数据</td>
             </tr>
           </tbody>
         </table>
@@ -179,6 +207,9 @@ function changePage(p) {
 .cell-preview:hover {
   color: var(--primary);
 }
+.status-ok { color: var(--ok); }
+.status-warn { color: var(--warn); }
+.status-err { color: var(--err); }
 /* 全文弹窗 */
 .modal-mask {
   position: fixed;

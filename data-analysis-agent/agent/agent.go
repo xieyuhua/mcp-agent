@@ -56,8 +56,8 @@ type extraMCP struct {
 }
 
 // New 构造 Agent：按配置启动 MCP（本地子进程或远程服务）、登录、预加载表结构。
-func New(cfg *config.Config) (*Agent, error) {
-	a := &Agent{cfg: cfg}
+func New(cfg *config.Config, callLogStore CallLogStore) (*Agent, error) {
+	a := &Agent{cfg: cfg, callLogStore: callLogStore}
 	// 加载技能目录（失败不致命，仅告警并继续；目录为空则无技能可用）。
 	skillStart := time.Now()
 	a.skills, _ = skill.LoadDir(cfg.SkillsDir)
@@ -218,7 +218,7 @@ func (a *Agent) ApplyConfig(cfg *config.Config) error {
 		a.cfg.MCP = cfg.MCP
 	}
 
-	// 日志开关热更新：后台修改“保存日志到文件”即时生效，无需重启。
+	// 日志开关热更新：后台修改"保存日志到文件"即时生效，无需重启。
 	logger.SetSaveToFile(cfg.Log.SaveToFile)
 	logger.SetDir(cfg.Log.Dir)
 
@@ -336,7 +336,7 @@ func (a *Agent) login() error {
 
 // connectExtraMCPs 连接配置中声明的额外远程 MCP 服务（失败仅告警，不阻断启动）。
 // includeMainRemote=true 时，主远程 MCP（cfg.MCP.BaseURL）也会并入额外列表
-// （用于“本地+远程同时开启”场景：本地是主 MCP，远程作为额外 MCP 聚合工具）。
+// （用于"本地+远程同时开启"场景：本地是主 MCP，远程作为额外 MCP 聚合工具）。
 func (a *Agent) connectExtraMCPs(cfg *config.Config, includeMainRemote bool) {
 	// 关闭旧连接，避免热更新时泄漏。
 	for _, em := range a.extraMCPs {
@@ -873,11 +873,11 @@ func containsAny(s string, subs []string) bool {
 type StreamEventKind string
 
 const (
-	EventStepStart       StreamEventKind = "step_start"        // 一次工具调用开始（含工具名/参数，工具执行期间持续展示“调用中”）
+	EventStepStart       StreamEventKind = "step_start"        // 一次工具调用开始（含工具名/参数，工具执行期间持续展示"调用中"）
 	EventStep            StreamEventKind = "step"              // 一次工具调用完成（含步骤日志）
-	EventStepProgress    StreamEventKind = "step_progress"     // 工具执行期间的流式进度（如「已读取 N 行」），前端实时刷新“调用中”卡片
-	EventStepResultDelta StreamEventKind = "step_result_delta" // 工具结果流式片段（让“分析过程”结果像打字机一样逐步出现）
-	EventThinking        StreamEventKind = "thinking"          // LLM 思考阶段（尚未产出 token/工具调用）；调用方可据此显示“思考中…”避免像卡死
+	EventStepProgress    StreamEventKind = "step_progress"     // 工具执行期间的流式进度（如「已读取 N 行」），前端实时刷新"调用中"卡片
+	EventStepResultDelta StreamEventKind = "step_result_delta" // 工具结果流式片段（让"分析过程"结果像打字机一样逐步出现）
+	EventThinking        StreamEventKind = "thinking"          // LLM 思考阶段（尚未产出 token/工具调用）；调用方可据此显示"思考中…"避免像卡死
 	EventAnswerDelta     StreamEventKind = "answer_delta"      // 最终回答的增量文本（逐 token 推送，实现打字机效果）
 	EventAnswer          StreamEventKind = "answer"            // 最终文字结论（完整文本，流式结束时兜底/校正）
 	EventResult          StreamEventKind = "result"            // 完整结构化结果（chart/rows/sql/steps），供流式前端渲染图表
@@ -958,6 +958,38 @@ func (a *Agent) MemoryInfo() map[string]int {
 	return map[string]int{
 		"max_history": mh,
 	}
+}
+
+// ConvCompressInfo 返回对话压缩为 skill 的配置，供 server 判断何时触发。
+func (a *Agent) ConvCompressInfo() map[string]int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	threshold := a.cfg.Agent.ConversationCompressTurns
+	if threshold < 0 {
+		threshold = 0
+	}
+	return map[string]int{
+		"compress_turns": threshold,
+	}
+}
+
+// SkillsDir 返回当前技能目录路径。
+func (a *Agent) SkillsDir() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.cfg.SkillsDir
+}
+
+// SkillContent 返回已加载技能的元数据与正文副本；name 不存在时返回 nil。
+func (a *Agent) SkillContent(name string) *skill.Skill {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	s, ok := a.skills[name]
+	if !ok || s == nil {
+		return nil
+	}
+	cp := *s
+	return &cp
 }
 
 // Ask 处理一次用户提问，返回最终分析文本（CLI 使用）。
@@ -1105,7 +1137,7 @@ func (a *Agent) AskRichWithHistory(history []HistoryItem, question string, opts 
 		var err error
 
 		// 进入 LLM 思考阶段（模型正在生成首个 token / 决策工具调用）。
-		// 调用方（CLI/前端）可据此显示“思考中…”，避免迟迟无数据像卡死。
+		// 调用方（CLI/前端）可据此显示"思考中…"，避免迟迟无数据像卡死。
 		onEvent(StreamEvent{Kind: EventThinking})
 
 		// 逐 token 回调：若调用方提供了 OnEvent，则实时推送增量文本（打字机效果）；
@@ -1151,13 +1183,20 @@ func (a *Agent) AskRichWithHistory(history []HistoryItem, question string, opts 
 
 		// 没有工具调用 -> 视为最终回答
 		if len(resp.ToolCalls) == 0 {
+			answer := strings.TrimSpace(resp.Content)
+			// 如果 LLM 返回空内容且还有剩余步数，跳过本轮继续（可能是 LLM 输出异常）
+			if answer == "" && step < a.cfg.Agent.MaxSteps-1 {
+				messages = append(messages, llm.Message{Role: "assistant", Content: ""})
+				messages = append(messages, llm.Message{Role: "user", Content: "请继续分析，如果需要工具请直接调用，如果有结论请直接输出。"})
+				continue
+			}
 			if !chartEnabled {
-				result.Chart = nil // 图表关闭：确保不返回图表
+				result.Chart = nil
 			}
 			if !showSQL {
-				result.SQL = "" // 提示词控制：不展示 SQL 时清空返回给前端
+				result.SQL = ""
 			}
-			result.Answer = strings.TrimSpace(resp.Content)
+			result.Answer = answer
 			result.TotalDuration = time.Since(startTime).Milliseconds()
 			onEvent(StreamEvent{Kind: EventAnswer, Text: result.Answer})
 			onEvent(StreamEvent{Kind: EventResult, Result: result})
@@ -1166,92 +1205,97 @@ func (a *Agent) AskRichWithHistory(history []HistoryItem, question string, opts 
 
 		}
 
-		// 执行所有工具调用，结果作为 tool 消息回灌
-		for _, tc := range resp.ToolCalls {
-			logger.Infof("[agent] 模型请求调用工具: %s 参数=%s", tc.Name, logger.Sanitize(tc.Arguments))
-			// 工具调用开始：先推送“调用中”事件，让前端在工具执行期间（可能较久）有持续反馈，避免像卡死。
-			onEvent(StreamEvent{Kind: EventStepStart, Step: &StepLog{Tool: tc.Name, Args: tc.Arguments}})
+		// 执行所有工具调用，结果作为 tool 消息回灌。
+		// 并发上限由 agent.tool_concurrency 控制：<=1 串行（默认，零风险）；>1 并发执行后统一回灌。
+		if a.cfg.Agent.ToolConcurrency <= 1 {
+			for _, tc := range resp.ToolCalls {
+				logger.Infof("[agent] 模型请求调用工具: %s 参数=%s", tc.Name, logger.Sanitize(tc.Arguments))
+				// 工具调用开始：先推送"调用中"事件，让前端在工具执行期间（可能较久）有持续反馈，避免像卡死。
+				onEvent(StreamEvent{Kind: EventStepStart, Step: &StepLog{ID: tc.ID, Tool: tc.Name, Args: tc.Arguments}})
 
-			// 在独立 goroutine 执行工具，主协程在等待期间周期性推送“执行中”心跳，
-			// 保证前端持续有反馈（流式、不卡死）；工具自身的真实进度（如已读取行数）
-			// 经 onProgress 即时推给前端。事件统一经 channel 回到主协程消费，避免并发写 SSE。
-			evCh := make(chan StreamEvent, 32)
-			resCh := make(chan string, 1)
-			var gotRealProgress atomic.Bool
-			toolStart := time.Now()
-		go func() {
-			userID := ""
-			convID := ""
-			if opts != nil {
-				userID = opts.UserID
-				convID = opts.ConversationID
-			}
-			text := a.executeTool(userID, convID, tc, result, func(message string) {
-				gotRealProgress.Store(true)
-				evCh <- StreamEvent{Kind: EventStepProgress, Step: &StepLog{Tool: tc.Name, Progress: message}}
-			})
-			resCh <- text
-		}()
+				// 在独立 goroutine 执行工具，主协程在等待期间周期性推送"执行中"心跳，
+				// 保证前端持续有反馈（流式、不卡死）；工具自身的真实进度（如已读取行数）
+				// 经 onProgress 即时推给前端。事件统一经 channel 回到主协程消费，避免并发写 SSE。
+				evCh := make(chan StreamEvent, 32)
+				resCh := make(chan string, 1)
+				var gotRealProgress atomic.Bool
+				toolStart := time.Now()
+			go func() {
+				userID := ""
+				convID := ""
+				if opts != nil {
+					userID = opts.UserID
+					convID = opts.ConversationID
+				}
+				text := a.executeTool(userID, convID, tc, result, func(message string) {
+					gotRealProgress.Store(true)
+					evCh <- StreamEvent{Kind: EventStepProgress, Step: &StepLog{ID: tc.ID, Tool: tc.Name, Progress: message}}
+				})
+				resCh <- text
+			}()
 
-			ticker := time.NewTicker(900 * time.Millisecond)
-			var toolResult string
-		waitLoop:
-			for {
-				select {
-				case ev := <-evCh:
-					onEvent(ev)
-				case text := <-resCh:
-					toolResult = text
-					break waitLoop
-				case <-ticker.C:
-					// 心跳：仅在尚无真实进度时告知前端“正在执行”，避免与真实进度文本互相覆盖。
-					if !gotRealProgress.Load() {
-						onEvent(StreamEvent{Kind: EventStepProgress, Step: &StepLog{Tool: tc.Name, Progress: "工具执行中…"}})
+				ticker := time.NewTicker(900 * time.Millisecond)
+				var toolResult string
+			waitLoop:
+				for {
+					select {
+					case ev := <-evCh:
+						onEvent(ev)
+					case text := <-resCh:
+						toolResult = text
+						break waitLoop
+					case <-ticker.C:
+						// 心跳：仅在尚无真实进度时告知前端"正在执行"，避免与真实进度文本互相覆盖。
+						if !gotRealProgress.Load() {
+							onEvent(StreamEvent{Kind: EventStepProgress, Step: &StepLog{ID: tc.ID, Tool: tc.Name, Progress: "工具执行中…"}})
+						}
 					}
 				}
-			}
-			ticker.Stop()
-			// 排空工具 goroutine 中可能残留的进度事件
-		drainLoop:
-			for {
-				select {
-				case ev := <-evCh:
-					onEvent(ev)
-				default:
-					break drainLoop
+				ticker.Stop()
+				// 排空工具 goroutine 中可能残留的进度事件
+			drainLoop:
+				for {
+					select {
+					case ev := <-evCh:
+						onEvent(ev)
+					default:
+						break drainLoop
+					}
 				}
-			}
 
-			logger.Infof("[agent] 工具返回(前%d): %s 耗时=%dms 结果=%s", a.cfg.Agent.LogPreviewChars, tc.Name, time.Since(toolStart).Milliseconds(), logger.Sanitize(truncate(toolResult, a.cfg.Agent.LogPreviewChars)))
-			// 展示用步骤日志：保留完整结果，前端“分析过程”不再截断。
-			// 喂给 LLM 上下文的则在下方 messages 中用 truncateResult 按行数裁剪，防止上下文膨胀。
-			stepLog := StepLog{Tool: tc.Name, Args: tc.Arguments, Result: toolResult, Duration: time.Since(toolStart).Milliseconds()}
-			result.ToolDuration += stepLog.Duration
-			result.Steps = append(result.Steps, stepLog)
+				logger.Infof("[agent] 工具返回(前%d): %s 耗时=%dms 结果=%s", a.cfg.Agent.LogPreviewChars, tc.Name, time.Since(toolStart).Milliseconds(), logger.Sanitize(truncate(toolResult, a.cfg.Agent.LogPreviewChars)))
+				// 展示用步骤日志：保留完整结果，前端"分析过程"不再截断。
+				// 喂给 LLM 上下文的则在下方 messages 中用 truncateResult 按行数裁剪，防止上下文膨胀。
+				stepLog := StepLog{ID: tc.ID, Tool: tc.Name, Args: tc.Arguments, Result: toolResult, Duration: time.Since(toolStart).Milliseconds()}
+				result.ToolDuration += stepLog.Duration
+				result.Steps = append(result.Steps, stepLog)
 
-			// 流式展示工具结果：把结果切成小段逐步推送，让“分析过程”动起来。
-			// 大结果只流式展示前 1000 字符，避免整轮耗时过长；剩余内容在 step 完成时一并给出。
-			// 短结果也至少分 2 段，确保肉眼能感知到流式效果。
-			const streamChunkSize = 25
-			const streamMinChunks = 2
-			const maxStreamResultLen = 1000
-			streamLen := min(len(toolResult), maxStreamResultLen)
-			chunkSize := streamChunkSize
-			if streamLen > 0 && streamLen/chunkSize < streamMinChunks {
-				chunkSize = max(1, (streamLen+streamMinChunks-1)/streamMinChunks)
-			}
-			for i := 0; i < streamLen; i += chunkSize {
-				end := min(i+chunkSize, streamLen)
-				onEvent(StreamEvent{Kind: EventStepResultDelta, Step: &StepLog{Tool: tc.Name, Result: toolResult[i:end]}})
-				if end < streamLen {
-					time.Sleep(40 * time.Millisecond)
+				// 流式展示工具结果：把结果切成小段逐步推送，让"分析过程"动起来。
+				// 大结果只流式展示前 1000 字符，避免整轮耗时过长；剩余内容在 step 完成时一并给出。
+				// 短结果也至少分 2 段，确保肉眼能感知到流式效果。
+				const streamChunkSize = 25
+				const streamMinChunks = 2
+				const maxStreamResultLen = 1000
+				streamLen := min(len(toolResult), maxStreamResultLen)
+				chunkSize := streamChunkSize
+				if streamLen > 0 && streamLen/chunkSize < streamMinChunks {
+					chunkSize = max(1, (streamLen+streamMinChunks-1)/streamMinChunks)
 				}
+				for i := 0; i < streamLen; i += chunkSize {
+					end := min(i+chunkSize, streamLen)
+					onEvent(StreamEvent{Kind: EventStepResultDelta, Step: &StepLog{ID: tc.ID, Tool: tc.Name, Result: toolResult[i:end]}})
+					if end < streamLen {
+						time.Sleep(40 * time.Millisecond)
+					}
+				}
+				onEvent(StreamEvent{Kind: EventStep, Step: &stepLog})
+				messages = append(messages,
+					llm.Message{Role: "assistant", Content: resp.Content, ToolCalls: []llm.ToolCall{tc}},
+					llm.Message{Role: "tool", Content: a.truncateResult(toolResult), ToolCallID: tc.ID, Name: tc.Name},
+				)
 			}
-			onEvent(StreamEvent{Kind: EventStep, Step: &stepLog})
-			messages = append(messages,
-				llm.Message{Role: "assistant", Content: resp.Content, ToolCalls: []llm.ToolCall{tc}},
-				llm.Message{Role: "tool", Content: a.truncateResult(toolResult), ToolCallID: tc.ID, Name: tc.Name},
-			)
+		} else {
+			a.runToolsConcurrent(resp, opts, result, onEvent, &messages)
 		}
 	}
 	err := fmt.Errorf("已达到最大推理步数 %d，仍未给出最终结论", a.cfg.Agent.MaxSteps)
@@ -1356,6 +1400,119 @@ func (a *Agent) executeTool(userID, convID string, tc llm.ToolCall, result *AskR
 	}
 	a.logMCPCall(userID, convID, tc.Name, a.serverNameOf(tc.Name), marshal(args), text, durationMs, false, "")
 	return text
+}
+
+// toolOutcome 并发执行时单个工具调用的独立结果，避免多 goroutine 共享写入同一 AskResult 产生数据竞争。
+type toolOutcome struct {
+	tc      llm.ToolCall
+	shadow  *AskResult // 该工具独立写入的结构化结果（SQL/Chart/Rows），与主 result 隔离
+	text    string     // 工具返回文本（完整，前端展示用）
+	stepLog StepLog
+}
+
+// runToolsConcurrent 并发执行同一轮 LLM 返回的多个工具调用（agent.tool_concurrency>1 时启用）。
+// 设计要点：
+//   - 每个工具在独立 goroutine 执行，写入各自的 shadow AskResult，彻底避免对主 result 的并发写竞争。
+//   - 所有进度/结果流式事件都带 tc.ID，并经同一个 evCh 汇总到主协程单点写出 SSE；
+//     前端按 ID 归类到独立卡片，并发时多张卡片各自更新，输出不混乱。
+//   - WaitGroup 等待全部完成后，按原始 tool_calls 顺序合并 shadow 到主 result 并回灌 messages（tool_call_id 一一对应）。
+func (a *Agent) runToolsConcurrent(resp *llm.Response, opts *AskOptions, result *AskResult, onEvent func(StreamEvent), messages *[]llm.Message) {
+	n := len(resp.ToolCalls)
+	// 先为每个工具推送 step_start，前端据此建立独立卡片（按 ID 归类），并发期间多张卡片各自更新。
+	for _, tc := range resp.ToolCalls {
+		onEvent(StreamEvent{Kind: EventStepStart, Step: &StepLog{ID: tc.ID, Tool: tc.Name, Args: tc.Arguments}})
+	}
+
+	evCh := make(chan StreamEvent, 64)
+	outcomes := make([]toolOutcome, n)
+
+	userID, convID := "", ""
+	if opts != nil {
+		userID, convID = opts.UserID, opts.ConversationID
+	}
+
+	var wg sync.WaitGroup
+	for i, tc := range resp.ToolCalls {
+		wg.Add(1)
+		go func(i int, tc llm.ToolCall) {
+			defer wg.Done()
+			shadow := &AskResult{}
+			toolStart := time.Now()
+			text := a.executeTool(userID, convID, tc, shadow, func(message string) {
+				evCh <- StreamEvent{Kind: EventStepProgress, Step: &StepLog{ID: tc.ID, Tool: tc.Name, Progress: message}}
+			})
+			dur := time.Since(toolStart).Milliseconds()
+			// 流式展示工具结果：切片逐步推送（带 ID，前端归类），与串行行为一致。
+			const streamChunkSize = 25
+			const streamMinChunks = 2
+			const maxStreamResultLen = 1000
+			streamLen := min(len(text), maxStreamResultLen)
+			chunkSize := streamChunkSize
+			if streamLen > 0 && streamLen/chunkSize < streamMinChunks {
+				chunkSize = max(1, (streamLen+streamMinChunks-1)/streamMinChunks)
+			}
+			for j := 0; j < streamLen; j += chunkSize {
+				end := min(j+chunkSize, streamLen)
+				evCh <- StreamEvent{Kind: EventStepResultDelta, Step: &StepLog{ID: tc.ID, Tool: tc.Name, Result: text[j:end]}}
+				if end < streamLen {
+					time.Sleep(40 * time.Millisecond)
+				}
+			}
+			stepLog := StepLog{ID: tc.ID, Tool: tc.Name, Args: tc.Arguments, Result: text, Duration: dur}
+			outcomes[i] = toolOutcome{tc: tc, shadow: shadow, text: text, stepLog: stepLog}
+			evCh <- StreamEvent{Kind: EventStep, Step: &stepLog}
+		}(i, tc)
+	}
+
+	// 主协程：单点消费事件并写出 SSE，直到所有工具完成。
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	for {
+		select {
+		case ev := <-evCh:
+			onEvent(ev)
+		case <-done:
+		drain:
+			for {
+				select {
+				case ev := <-evCh:
+					onEvent(ev)
+				default:
+					break drain
+				}
+			}
+			a.mergeToolOutcomes(resp, outcomes, result, messages)
+			return
+		}
+	}
+}
+
+// mergeToolOutcomes 并发完成后按原始顺序合并各工具的独立结果到主 result，并回灌 messages。
+func (a *Agent) mergeToolOutcomes(resp *llm.Response, outcomes []toolOutcome, result *AskResult, messages *[]llm.Message) {
+	// 一个 assistant 消息承载本轮全部 tool_calls，其后为每个工具对应的 tool 消息（按 tool_call_id 匹配）。
+	*messages = append(*messages,
+		llm.Message{Role: "assistant", Content: resp.Content, ToolCalls: resp.ToolCalls},
+	)
+	for _, o := range outcomes {
+		// 合并结构化结果：SQL 取最后一个非空；Chart 保持"已存在不覆盖"语义；Rows 取最后一个非空（与串行"后者覆盖"一致）。
+		if o.shadow.SQL != "" {
+			result.SQL = o.shadow.SQL
+		}
+		if o.shadow.Chart != nil && result.Chart == nil {
+			result.Chart = o.shadow.Chart
+		}
+		if len(o.shadow.Rows) > 0 {
+			result.Rows = o.shadow.Rows
+		}
+		result.ToolDuration += o.stepLog.Duration
+		result.Steps = append(result.Steps, o.stepLog)
+		*messages = append(*messages,
+			llm.Message{Role: "tool", Content: a.truncateResult(o.text), ToolCallID: o.tc.ID, Name: o.tc.Name},
+		)
+	}
 }
 
 // serverNameOf 返回提供某工具的服务名（用于 MCP 调用日志的 server_name 字段）。

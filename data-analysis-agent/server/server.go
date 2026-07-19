@@ -2,11 +2,12 @@ package server
 
 import (
 	"encoding/json"
+	"io/fs"
 	"log"
+	"mime"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -24,16 +25,19 @@ import (
 type Server struct {
 	ag           *agent.Agent
 	users        *userdb.Store // 前端用户体系与多轮会话持久化
-	staticDir    string
 	adminHandler http.Handler // 后台管理（配置 CRUD + 页面）
 	router       *gin.Engine
+	uiFS         fs.FS       // 嵌入的 Vue 前端 dist
+
+	compressedConvs map[string]struct{} // 已压缩为 skill 的会话 ID，防止重复压缩
 }
 
-// New 构造 HTTP Server。staticDir 为前端构建产物目录（可为空，仅提供 API）；
+// New 构造 HTTP Server。
 // adminHandler 为后台管理路由（配置增删改查与页面），可为 nil；
 // users 为用户/会话存储（登录注册与多轮对话）。
-func New(ag *agent.Agent, users *userdb.Store, staticDir string, adminHandler http.Handler) *Server {
-	s := &Server{ag: ag, users: users, staticDir: staticDir, adminHandler: adminHandler}
+func New(ag *agent.Agent, users *userdb.Store, adminHandler http.Handler) *Server {
+	uiFS, _ := fs.Sub(webui.Assets, "dist")
+	s := &Server{ag: ag, users: users, adminHandler: adminHandler, uiFS: uiFS, compressedConvs: make(map[string]struct{})}
 	s.router = s.buildRouter()
 	return s
 }
@@ -72,29 +76,18 @@ func (s *Server) buildRouter() *gin.Engine {
 	r.Any("/api/mcp-proxy", s.handleMCPProxy)
 	r.Any("/api/mcp-proxy/*path", s.handleMCPProxy)
 
-	// 聊天前端页面（自包含，无需前端构建）。
-	r.GET("/ui", s.handleUI)
-	r.GET("/", s.handleUI)
+	// Vue 聊天前端（嵌入 dist）。
+	if s.uiFS != nil {
+		r.GET("/", s.serveUI("index.html"))
+		r.GET("/ui", s.serveUI("index.html"))
+		r.GET("/assets/*path", s.serveUIAssets)
+	}
 
 	// 后台管理：API 与页面。
 	if s.adminHandler != nil {
 		r.Any("/api/admin/*path", gin.WrapH(s.adminHandler))
 		r.GET("/admin", gin.WrapH(s.adminHandler))
 		r.GET("/admin/*path", gin.WrapH(s.adminHandler))
-	}
-
-	// 可选的 Vue 构建产物（web/dist）：挂载在 /app/ 前缀下。
-	if s.staticDir != "" {
-		if info, err := os.Stat(s.staticDir); err == nil && info.IsDir() {
-			r.StaticFS("/app/", http.Dir(s.staticDir))
-			r.NoRoute(func(c *gin.Context) {
-				if strings.HasPrefix(c.Request.URL.Path, "/app/") {
-					c.File(filepath.Join(s.staticDir, "index.html"))
-					return
-				}
-				c.Next()
-			})
-		}
 	}
 
 	return r
@@ -165,11 +158,6 @@ func (s *Server) corsMiddleware() gin.HandlerFunc {
 func (s *Server) Run(addr string) error {
 	log.Printf("[server] 数据分析助手 HTTP 服务已启动: http://%s", normalizeAddr(addr))
 	log.Printf("[server] 聊天页面: /   后台管理: /admin   API: POST /api/ask  健康检查: GET /api/health")
-	if s.staticDir != "" {
-		if info, err := os.Stat(s.staticDir); err == nil && info.IsDir() {
-			log.Printf("[server] 已挂载 Vue 构建产物(%s) 于 /app/", s.staticDir)
-		}
-	}
 	return s.router.Run(addr)
 }
 
@@ -259,13 +247,14 @@ func singleJoinPath(base, suffix string) string {
 func (s *Server) handleUIConfig(c *gin.Context) {
 	ui := s.ag.UIConfig()
 	c.JSON(http.StatusOK, gin.H{
-		"show_duration":  ui.ShowDuration,
-		"show_steps":     ui.ShowSteps,
-		"show_images":    ui.ShowImages,
-		"theme":          ui.Theme,
-		"app_title":      ui.AppTitle,
-		"app_subtitle":   ui.AppSubtitle,
-		"workflow_steps": ui.WorkflowSteps,
+		"show_duration":    ui.ShowDuration,
+		"show_steps":       ui.ShowSteps,
+		"show_images":      ui.ShowImages,
+		"theme":            ui.Theme,
+		"app_title":        ui.AppTitle,
+		"app_subtitle":     ui.AppSubtitle,
+		"workflow_steps":   ui.WorkflowSteps,
+		"sample_questions": ui.SampleQuestions,
 	})
 }
 
@@ -320,6 +309,8 @@ func (s *Server) handleAsk(c *gin.Context) {
 	s.persistRound(conv.ID, q, res)
 	logger.Infof("[http] 回答完成: 用户=%s 会话=%s 答案长度=%d 步骤数=%d", user.Username, conv.ID, len(res.Answer), len(res.Steps))
 
+	go s.tryCompressConversation(user.ID, conv.ID, history)
+
 	c.JSON(http.StatusOK, gin.H{
 		"conversation_id": conv.ID,
 		"result":          res,
@@ -350,6 +341,49 @@ func (s *Server) persistRound(convID, q string, res *agent.AskResult) {
 	}
 	extra := marshalExtra(res)
 	_, _ = s.users.AddMessage(convID, "assistant", res.Answer, extra)
+}
+
+// tryCompressConversation 检查对话轮次是否达到阈值，若达到则将整段对话压缩为 skill。
+// 每个会话仅触发一次，避免重复压缩。
+// history 为本次提问之前的历史消息（不含本轮）。
+func (s *Server) tryCompressConversation(userID, convID string, history []agent.HistoryItem) {
+	info := s.ag.ConvCompressInfo()
+	threshold := info["compress_turns"]
+	if threshold <= 0 {
+		return
+	}
+	// 已压缩过的跳过
+	if _, ok := s.compressedConvs[convID]; ok {
+		return
+	}
+	// 当前轮次 = (历史消息数 + 本轮新增2条) / 2
+	turns := (len(history) + 2) / 2
+	if turns < threshold {
+		return
+	}
+
+	// 读取完整对话（含本轮）用于压缩
+	msgs, err := s.users.ListMessages(userID, convID)
+	if err != nil || len(msgs) == 0 {
+		return
+	}
+	items := make([]agent.HistoryItem, 0, len(msgs))
+	for _, m := range msgs {
+		items = append(items, agent.HistoryItem{Role: m.Role, Content: m.Content, Extra: m.Extra})
+	}
+
+	// 获取会话标题
+	conv, err := s.users.GetConversation(userID, convID)
+	if err != nil {
+		conv = &userdb.Conversation{Title: "对话"}
+	}
+
+	if err := s.ag.CompressToSkill(items, conv.Title, convID); err != nil {
+		logger.Warnf("[server] 对话压缩为 skill 失败: conv=%s err=%v", convID, err)
+	} else {
+		s.compressedConvs[convID] = struct{}{}
+		logger.Infof("[server] 对话已压缩为 skill: conv=%s title=%q", convID, conv.Title)
+	}
 }
 
 // handleAskStream 以 SSE 流式返回 agent 处理过程。
@@ -434,6 +468,7 @@ func (s *Server) handleAskStream(c *gin.Context, user *userdb.User, conv *userdb
 	finalResult = res
 
 	s.persistRound(conv.ID, q, finalResult)
+	go s.tryCompressConversation(user.ID, conv.ID, history)
 	send(map[string]interface{}{"kind": "close"})
 }
 
@@ -740,16 +775,60 @@ func (s *Server) handleConversationRename(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
-// handleUI 返回内嵌的聊天前端页面（自包含，无需前端构建）。
-func (s *Server) handleUI(c *gin.Context) {
-	data, err := webui.Assets.ReadFile("chat.html")
+// serveUI 返回一个 gin.HandlerFunc，从嵌入的 Vue dist 中提供文件（SPA 回退到 index.html）。
+func (s *Server) serveUI(defaultFile string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if s.uiFS == nil {
+			c.String(http.StatusNotFound, "page not found")
+			return
+		}
+		path := strings.TrimPrefix(c.Request.URL.Path, "/")
+		if path == "" || !strings.Contains(path, ".") {
+			path = defaultFile
+		}
+		if strings.Contains(path, "..") {
+			path = defaultFile
+		}
+		data, err := fs.ReadFile(s.uiFS, path)
+		if err != nil {
+			data, err = fs.ReadFile(s.uiFS, defaultFile)
+			if err != nil {
+				c.String(http.StatusNotFound, "page not found")
+				return
+			}
+		}
+		ctype := mime.TypeByExtension(filepath.Ext(path))
+		if ctype == "" {
+			ctype = "text/html; charset=utf-8"
+		}
+		c.Header("Content-Type", ctype)
+		c.Header("Cache-Control", "no-store")
+		c.Data(http.StatusOK, ctype, data)
+	}
+}
+
+// serveUIAssets 提供嵌入 dist 中的静态资源文件。
+func (s *Server) serveUIAssets(c *gin.Context) {
+	if s.uiFS == nil {
+		c.String(http.StatusNotFound, "page not found")
+		return
+	}
+	path := strings.TrimPrefix(c.Request.URL.Path, "/")
+	if strings.Contains(path, "..") {
+		path = "index.html"
+	}
+	data, err := fs.ReadFile(s.uiFS, path)
 	if err != nil {
 		c.String(http.StatusNotFound, "page not found")
 		return
 	}
-	c.Header("Content-Type", "text/html; charset=utf-8")
-	c.Header("Cache-Control", "no-store")
-	c.String(http.StatusOK, string(data))
+	ctype := mime.TypeByExtension(filepath.Ext(path))
+	if ctype == "" {
+		ctype = "application/octet-stream"
+	}
+	c.Header("Content-Type", ctype)
+	c.Header("Cache-Control", "max-age=3600")
+	c.Data(http.StatusOK, ctype, data)
 }
 
 func normalizeAddr(addr string) string {

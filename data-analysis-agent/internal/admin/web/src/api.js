@@ -85,7 +85,24 @@ export const logs = {
   mcp: (params = {}) => {
     const q = new URLSearchParams(params)
     return request('/mcp-logs?' + q.toString())
+  },
+  request: (params = {}) => {
+    const q = new URLSearchParams(params)
+    return request('/request-logs?' + q.toString())
+  },
+  activity: (params = {}) => {
+    const q = new URLSearchParams(params)
+    return request('/activity-logs?' + q.toString())
   }
+}
+
+export const skills = {
+  list: () => request('/skills'),
+  get: (name) => request('/skills/' + encodeURIComponent(name)),
+  create: (body) => request('/skills', 'POST', body),
+  update: (name, body) => request('/skills/' + encodeURIComponent(name), 'PUT', body),
+  del: (name) => request('/skills/' + encodeURIComponent(name), 'DELETE'),
+  reload: () => request('/reload-skills', 'POST')
 }
 
 export function hasPerm(userPerms, code) {
