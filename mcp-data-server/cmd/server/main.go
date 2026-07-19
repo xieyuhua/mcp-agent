@@ -152,6 +152,14 @@ func startHTTP(ctx context.Context, cfg *config.Config, mcpServer *mcpserver.MCP
 	}
 
 	httpSrv := mcpserver.NewStreamableHTTPServer(mcpServer, mcpserver.WithEndpointPath("/mcp"))
+	// SSE 服务端：标准 MCP 旧版 SSE 传输（GET /sse 建立接收流 + POST /messages 发送请求），
+	// 供 llama.cpp 等以 SSE 方式对接的 MCP 客户端连接（如 llama.cpp 的 --mcp-server sse://host:8081/sse）。
+	// 复用同一个 mcpServer 实例，工具清单与鉴权逻辑完全一致。
+	sseSrv := mcpserver.NewSSEServer(mcpServer,
+		mcpserver.WithSSEEndpoint("/sse"),
+		mcpserver.WithMessageEndpoint("/messages"),
+		mcpserver.WithSSEDisableLocalhostProtection(true),
+	)
 	adminSrv := admin.New(authSvc, permSvc)
 
 	gin.SetMode(gin.ReleaseMode)
@@ -160,6 +168,8 @@ func startHTTP(ctx context.Context, cfg *config.Config, mcpServer *mcpserver.MCP
 	r.Use(corsMiddleware())
 
 	r.Any("/mcp", gin.WrapH(httpSrv))
+	r.Any("/sse", gin.WrapH(sseSrv))
+	r.Any("/messages", gin.WrapH(sseSrv))
 	r.Any("/api/admin/*path", gin.WrapH(adminSrv.Handler()))
 	r.GET("/", gin.WrapH(web.StaticHandler(cfg.WebDir)))
 	r.NoRoute(gin.WrapH(web.StaticHandler(cfg.WebDir)))
@@ -171,7 +181,7 @@ func startHTTP(ctx context.Context, cfg *config.Config, mcpServer *mcpserver.MCP
 		errCh <- srv.ListenAndServe()
 	}()
 
-	log.Printf("mcp-data-server HTTP started: http://%s  (mcp=/mcp, admin=/api/admin, web=/)", normalizeAddr(addr))
+	log.Printf("mcp-data-server HTTP started: http://%s  (mcp=/mcp, sse=/sse, admin=/api/admin, web=/)", normalizeAddr(addr))
 	select {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

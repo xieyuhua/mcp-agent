@@ -390,7 +390,7 @@ func (c *Client) ChatStreamWithLog(messages []Message, tools []Tool, onToken fun
 
 // logCall 触发调用日志回调。
 func (c *Client) logCall(logCtx *LogContext, messages []Message, tools []Tool, resp *Response, duration time.Duration, err error) {
-	if c.OnLog == nil || logCtx == nil {
+	if c.OnLog == nil {
 		return
 	}
 	reqInfo := map[string]interface{}{

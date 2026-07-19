@@ -48,8 +48,20 @@ type Role struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
+// AdminRole 后台管理员角色（与前端用户角色分离）。
+type AdminRole struct {
+	ID          uint      `gorm:"primaryKey" json:"id"`
+	Name        string    `gorm:"uniqueIndex;size:32" json:"name"`
+	DisplayName string    `gorm:"size:128" json:"display_name"`
+	Description string    `gorm:"type:text" json:"description"`
+	Permissions string    `gorm:"type:text" json:"permissions,omitempty"`
+	IsBuiltin   bool      `gorm:"not null;default:false" json:"is_builtin"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
 // TableName 显式指定表名。
-func (Role) TableName() string { return "roles" }
+func (AdminRole) TableName() string { return "admin_roles" }
 
 // Session 登录会话令牌。
 type Session struct {
@@ -141,10 +153,37 @@ func New(dbPath string) (*Store, error) {
 	if err := configurePool(db); err != nil {
 		return nil, fmt.Errorf("configure user db pool: %w", err)
 	}
-	if err := db.AutoMigrate(&User{}, &Session{}, &Role{}, &Conversation{}, &Message{}, &Admin{}, &LLMCallLog{}, &MCPCallLog{}); err != nil {
+	if err := db.AutoMigrate(&User{}, &Session{}, &Role{}, &AdminRole{}, &Conversation{}, &Message{}, &Admin{}, &LLMCallLog{}, &MCPCallLog{}); err != nil {
 		return nil, fmt.Errorf("migrate user db: %w", err)
 	}
-	return &Store{db: db}, nil
+	store := &Store{db: db}
+	store.seedAdminRoles()
+	return store, nil
+}
+
+// seedAdminRoles 初始化内置管理员角色，确保迁移后始终可用。
+func (s *Store) seedAdminRoles() {
+	_ = s.UpsertAdminRole(&AdminRole{
+		Name:        "super_admin",
+		DisplayName: "超级管理员",
+		Description: "拥有所有后台权限",
+		Permissions: "admin:all",
+		IsBuiltin:   true,
+	})
+	_ = s.UpsertAdminRole(&AdminRole{
+		Name:        "admin",
+		DisplayName: "管理员",
+		Description: "常规管理员，可查看和修改大部分配置",
+		Permissions: "config:read,config:write,user:read,user:write,role:read,role:write,admin:read,admin_role:read,chat_log:read,llm_log:read,mcp_log:read",
+		IsBuiltin:   true,
+	})
+	_ = s.UpsertAdminRole(&AdminRole{
+		Name:        "viewer",
+		DisplayName: "只读管理员",
+		Description: "仅可查看配置、用户和日志",
+		Permissions: "config:read,user:read,role:read,admin:read,admin_role:read,chat_log:read,llm_log:read,mcp_log:read",
+		IsBuiltin:   true,
+	})
 }
 
 // configurePool 配置 SQLite 连接池，避免并发访问冲突。
@@ -408,6 +447,26 @@ func (s *Store) AdminCreateUser(username, phone, password, role string) (*User, 
 		return nil, err
 	}
 	return u, nil
+}
+
+// DeleteUser 删除前端用户及其会话、消息和会话记录。
+func (s *Store) DeleteUser(userID string) error {
+	var convs []Conversation
+	if err := s.db.Where("user_id = ?", userID).Find(&convs).Error; err != nil {
+		return err
+	}
+	for _, c := range convs {
+		if err := s.db.Where("conversation_id = ?", c.ID).Delete(&Message{}).Error; err != nil {
+			return err
+		}
+	}
+	if err := s.db.Where("user_id = ?", userID).Delete(&Conversation{}).Error; err != nil {
+		return err
+	}
+	if err := s.db.Where("user_id = ?", userID).Delete(&Session{}).Error; err != nil {
+		return err
+	}
+	return s.db.Where("id = ?", userID).Delete(&User{}).Error
 }
 
 // SetUserDisabled 启用/禁用用户。
@@ -833,7 +892,7 @@ func (s *Store) ListAdmins() ([]AdminView, error) {
 	if err := s.db.Order("created_at asc").Find(&list).Error; err != nil {
 		return nil, err
 	}
-	roles, _ := s.ListRoles()
+	roles, _ := s.ListAdminRoles()
 	roleMap := map[string]string{}
 	for _, r := range roles {
 		roleMap[r.Name] = r.DisplayName
@@ -928,6 +987,79 @@ func (s *Store) DeleteAdmin(id string) error {
 		return errors.New("至少保留一个管理员账号")
 	}
 	return s.db.Where("id = ?", id).Delete(&Admin{}).Error
+}
+
+// ---- 管理员角色（后台） ----
+
+// ListAdminRoles 列出所有管理员角色。
+func (s *Store) ListAdminRoles() ([]AdminRole, error) {
+	var list []AdminRole
+	err := s.db.Order("created_at asc").Find(&list).Error
+	return list, err
+}
+
+// UpsertAdminRole 新增或更新管理员角色。
+func (s *Store) UpsertAdminRole(role *AdminRole) error {
+	role.Name = strings.TrimSpace(role.Name)
+	if role.Name == "" {
+		return errors.New("角色标识不能为空")
+	}
+	role.UpdatedAt = time.Now()
+	if role.CreatedAt.IsZero() {
+		role.CreatedAt = role.UpdatedAt
+	}
+	var existing AdminRole
+	err := s.db.Where("name = ?", role.Name).First(&existing).Error
+	if err == nil {
+		if existing.IsBuiltin {
+			role.IsBuiltin = true
+		}
+		role.ID = existing.ID
+		role.CreatedAt = existing.CreatedAt
+		if role.Permissions == "" && existing.Permissions != "" {
+			role.Permissions = existing.Permissions
+		}
+		return s.db.Save(role).Error
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return s.db.Create(role).Error
+	}
+	return err
+}
+
+// DeleteAdminRole 删除非内置管理员角色。
+func (s *Store) DeleteAdminRole(name string) error {
+	var r AdminRole
+	if err := s.db.Where("name = ?", name).First(&r).Error; err != nil {
+		return err
+	}
+	if r.IsBuiltin {
+		return errors.New("内置角色不能删除")
+	}
+	if err := s.db.Model(&Admin{}).Where("role = ?", name).Update("role", "admin").Error; err != nil {
+		return err
+	}
+	return s.db.Where("name = ?", name).Delete(&AdminRole{}).Error
+}
+
+// AdminRolePermissions 返回指定管理员角色的权限列表。
+func (s *Store) AdminRolePermissions(roleName string) []string {
+	if roleName == "" {
+		return nil
+	}
+	var r AdminRole
+	if err := s.db.Where("name = ?", roleName).First(&r).Error; err != nil {
+		return nil
+	}
+	parts := strings.Split(r.Permissions, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // csvHeaderIndex 把 CSV 表头映射为列名->索引。

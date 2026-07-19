@@ -167,7 +167,7 @@ TRANSPORT=both HTTP_ADDR=:8081 go run ./cmd/server
 HTTP 暴露的端点：
 
 - `POST /mcp` —— **streamable-http**（默认，推荐）：请求可为 JSON 或 SSE 流，自动处理 `Mcp-Session-Id` 会话头。
-- `GET /sse` + `POST /messages` —— **旧版 sse** 传输：GET 建立接收流，POST 发送请求。
+- `GET /sse` + `POST /messages` —— **旧版 sse** 传输：**HTTP 模式下默认同时启用**，GET 建立接收流并推送 `event: endpoint`（`data: /messages?sessionId=xxx`），POST 发送 JSON-RPC。可直接被 llama.cpp 等以 SSE 方式对接的 MCP 客户端连接（如 llama.cpp 的 `--mcp-server sse://host:8081/sse`）。
 - `/api/admin/*` —— 权限后台 REST API（见下）。
 - `/` —— 权限后台管理页面（内嵌或外部目录）。
 

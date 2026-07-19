@@ -5,5 +5,5 @@ import "embed"
 
 // Assets 编译期内嵌的 Web 资源。
 //
-//go:embed all:assets
+//go:embed all:dist
 var Assets embed.FS

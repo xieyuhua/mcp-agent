@@ -1,0 +1,95 @@
+const API = '/api/admin'
+
+async function request(path, method = 'GET', body = null) {
+  const opts = {
+    method,
+    headers: {},
+    credentials: 'include'
+  }
+  const token = localStorage.getItem('admin_token')
+  if (token) {
+    opts.headers['Authorization'] = 'Bearer ' + token
+  }
+  if (body) {
+    opts.headers['Content-Type'] = 'application/json'
+    opts.body = JSON.stringify(body)
+  }
+  const res = await fetch(API + path, opts)
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    throw new Error(data.error || res.statusText)
+  }
+  return data
+}
+
+export const auth = {
+  login: (username, password) => request('/login', 'POST', { username, password }),
+  logout: () => request('/logout', 'POST'),
+  me: () => request('/me'),
+  changePassword: (body) => request('/me/password', 'POST', body)
+}
+
+export const permissions = {
+  list: () => request('/permissions')
+}
+
+export const config = {
+  get: () => request('/config'),
+  save: (values) => request('/config', 'PUT', { values }),
+  reset: () => request('/reset', 'POST'),
+  mcpTest: (body) => request('/mcp-test', 'POST', body)
+}
+
+export const users = {
+  list: (params = {}) => {
+    const q = new URLSearchParams(params)
+    return request('/users?' + q.toString())
+  },
+  create: (body) => request('/users', 'POST', body),
+  delete: (id) => request('/users/' + id, 'DELETE'),
+  disable: (id, disabled) => request('/users/' + id + '/disable', 'POST', { disabled }),
+  resetPassword: (id, password) => request('/users/' + id + '/password', 'POST', { password }),
+  setRole: (id, role) => request('/users/' + id + '/role', 'POST', { role })
+}
+
+export const roles = {
+  list: () => request('/roles'),
+  create: (body) => request('/roles', 'POST', body),
+  delete: (name) => request('/roles?name=' + encodeURIComponent(name), 'DELETE')
+}
+
+export const admins = {
+  list: () => request('/admins'),
+  create: (body) => request('/admins', 'POST', body),
+  delete: (id) => request('/admins/' + id, 'DELETE'),
+  disable: (id, disabled) => request('/admins/' + id + '/disable', 'POST', { disabled }),
+  resetPassword: (id, password) => request('/admins/' + id + '/password', 'POST', { password }),
+  setRole: (id, role) => request('/admins/' + id + '/role', 'POST', { role })
+}
+
+export const adminRoles = {
+  list: () => request('/admin-roles'),
+  create: (body) => request('/admin-roles', 'POST', body),
+  delete: (name) => request('/admin-roles?name=' + encodeURIComponent(name), 'DELETE')
+}
+
+export const logs = {
+  chat: (params = {}) => {
+    const q = new URLSearchParams(params)
+    return request('/chat-logs?' + q.toString())
+  },
+  llm: (params = {}) => {
+    const q = new URLSearchParams(params)
+    return request('/llm-logs?' + q.toString())
+  },
+  mcp: (params = {}) => {
+    const q = new URLSearchParams(params)
+    return request('/mcp-logs?' + q.toString())
+  }
+}
+
+export function hasPerm(userPerms, code) {
+  if (!userPerms || userPerms.length === 0) return false
+  if (userPerms.includes('admin:all')) return true
+  return userPerms.includes(code)
+}

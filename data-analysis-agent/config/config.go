@@ -88,12 +88,20 @@ type PromptsConfig struct {
 	Remote string `json:"remote"`
 }
 
-// MCPConfig 后端 MCP 服务配置，支持两种对接方案：
-//   - mode="local"（默认）：拉起内置 mcp-data-server 子进程（stdio）
-//   - mode="remote"：对接远程 MCP 服务（streamable-http / sse）
+// MCPConfig 后端 MCP 服务配置。本地 MCP（内置 mcp-data-server 子进程）与
+// 远程 MCP（HTTP 服务，如 llama.cpp）为两套相互独立的对接，可各自独立开关：
+//   - LocalEnabled：是否启用本地内置 mcp-data-server（stdio 子进程）
+//   - RemoteEnabled：是否启用远程 MCP 服务（streamable-http / sse）
+// 两者可同时开启（本地作为主 MCP，远程作为额外 MCP 聚合）；也可只开其一。
+// Mode 字段仅用于兼容旧配置：当 LocalEnabled/RemoteEnabled 均为 false 时，
+// 按 Mode 决定（local=仅本地，remote=仅远程）。
 type MCPConfig struct {
-	// Mode 对接方案："local" | "remote"，默认 local。
+	// Mode 兼容旧配置：local | remote（新配置请用下方两个开关）。
 	Mode string `json:"mode"`
+	// LocalEnabled 是否启用本地内置 mcp-data-server（默认 true）。
+	LocalEnabled bool `json:"local_enabled"`
+	// RemoteEnabled 是否启用远程 MCP 服务（默认 false，需配置 base_url）。
+	RemoteEnabled bool `json:"remote_enabled"`
 
 	// --- local（内置 mcp-data-server 子进程）相关 ---
 	// ServerPath 编译好的 mcp-data-server 可执行文件路径。
@@ -268,6 +276,8 @@ func DefaultConfig() *Config {
 		},
 		MCP: MCPConfig{
 			Mode:           "local",
+			LocalEnabled:   true,
+			RemoteEnabled:  false,
 			ServerPath:     "../mcp-data-server/main.exe",
 			Username:       "admin",
 			Password:       "admin123",

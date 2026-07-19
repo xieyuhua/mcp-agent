@@ -1,4 +1,4 @@
-// Package admin 提供数据分析助手的后台管理：登录、配置查看/修改/重置。
+// Package admin 提供数据分析助手的后台管理：登录、配置查看/修改/重置、用户/角色/管理员/权限管理。
 // 所有运行配置（LLM / MCP / Agent / 提示词 / 后台凭据）均持久化在数据库，
 // 修改后即时热更新到 Agent，无需重启进程。
 package admin
@@ -8,25 +8,56 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"io"
+	"io/fs"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 
 	"company.com/data-analysis-agent/agent"
 	"company.com/data-analysis-agent/internal/admin/web"
 	"company.com/data-analysis-agent/internal/confdb"
 	"company.com/data-analysis-agent/internal/userdb"
+	"company.com/data-analysis-agent/mcpclient"
 
 	"github.com/gin-gonic/gin"
 )
+
+// 后台权限清单（也用于前端复选框展示）。
+var AdminPermissions = []Permission{
+	{Code: "config:read", Name: "配置查看", Module: "系统配置"},
+	{Code: "config:write", Name: "配置修改", Module: "系统配置"},
+	{Code: "user:read", Name: "用户查看", Module: "用户管理"},
+	{Code: "user:write", Name: "用户新增/编辑", Module: "用户管理"},
+	{Code: "user:delete", Name: "用户删除", Module: "用户管理"},
+	{Code: "role:read", Name: "角色查看", Module: "角色管理"},
+	{Code: "role:write", Name: "角色新增/编辑", Module: "角色管理"},
+	{Code: "role:delete", Name: "角色删除", Module: "角色管理"},
+	{Code: "admin:read", Name: "管理员查看", Module: "管理员管理"},
+	{Code: "admin:write", Name: "管理员新增/编辑", Module: "管理员管理"},
+	{Code: "admin:delete", Name: "管理员删除", Module: "管理员管理"},
+	{Code: "admin_role:read", Name: "管理员角色查看", Module: "权限管理"},
+	{Code: "admin_role:write", Name: "管理员角色新增/编辑", Module: "权限管理"},
+	{Code: "admin_role:delete", Name: "管理员角色删除", Module: "权限管理"},
+	{Code: "chat_log:read", Name: "沟通日志查看", Module: "日志管理"},
+	{Code: "llm_log:read", Name: "LLM 日志查看", Module: "日志管理"},
+	{Code: "mcp_log:read", Name: "MCP 日志查看", Module: "日志管理"},
+}
+
+// Permission 描述一项可分配的权限。
+type Permission struct {
+	Code   string `json:"code"`
+	Name   string `json:"name"`
+	Module string `json:"module"`
+}
 
 // Server 后台管理服务。
 type Server struct {
 	store      *confdb.Store
 	users      *userdb.Store
 	ag         *agent.Agent
-	adminToken string // 进程内管理员令牌（登录成功后下发）
-	adminUser  *adminSession
+	sessions   map[string]*adminSession // token -> session
+	sessionMu sync.RWMutex
 	router     *gin.Engine
 }
 
@@ -39,10 +70,10 @@ type adminSession struct {
 // New 构造后台管理服务。
 func New(store *confdb.Store, users *userdb.Store, ag *agent.Agent) *Server {
 	s := &Server{
-		store:      store,
-		users:      users,
-		ag:         ag,
-		adminToken: genToken(),
+		store:     store,
+		users:     users,
+		ag:        ag,
+		sessions:  make(map[string]*adminSession),
 	}
 	s.router = s.buildRouter()
 	return s
@@ -62,11 +93,16 @@ func (s *Server) buildRouter() *gin.Engine {
 	api := r.Group("/api/admin")
 	{
 		api.POST("/login", s.handleLogin)
+		api.POST("/logout", s.requireAuth(), s.handleLogout)
 		api.GET("/me", s.requireAuth(), s.handleAdminMe)
 		api.POST("/me/password", s.requireAuth(), s.handleAdminChangePassword)
+
+		api.GET("/permissions", s.requireAuth(), s.handlePermissions)
+
 		api.GET("/config", s.requireAuth(), s.requirePerm("config:read"), s.handleConfig)
 		api.PUT("/config", s.requireAuth(), s.requirePerm("config:write"), s.handleConfig)
 		api.POST("/reset", s.requireAuth(), s.requirePerm("config:write"), s.handleReset)
+		api.POST("/mcp-test", s.requireAuth(), s.requirePerm("config:read"), s.handleMCPTest)
 
 		api.GET("/users", s.requireAuth(), s.requirePerm("user:read"), s.handleUsers)
 		api.POST("/users", s.requireAuth(), s.requirePerm("user:write"), s.handleUsers)
@@ -75,25 +111,81 @@ func (s *Server) buildRouter() *gin.Engine {
 		api.POST("/users/:id/disable", s.requireAuth(), s.requirePerm("user:write"), s.handleUserDisable)
 		api.POST("/users/:id/password", s.requireAuth(), s.requirePerm("user:write"), s.handleUserPassword)
 		api.POST("/users/:id/role", s.requireAuth(), s.requirePerm("user:write"), s.handleUserRole)
+		api.DELETE("/users/:id", s.requireAuth(), s.requirePerm("user:delete"), s.handleUserDelete)
 
 		api.GET("/roles", s.requireAuth(), s.requirePerm("role:read"), s.handleRoles)
 		api.POST("/roles", s.requireAuth(), s.requirePerm("role:write"), s.handleRoles)
 		api.DELETE("/roles", s.requireAuth(), s.requirePerm("role:delete"), s.handleRoleDelete)
 
+		api.GET("/admins", s.requireAuth(), s.requirePerm("admin:read"), s.handleAdmins)
+		api.POST("/admins", s.requireAuth(), s.requirePerm("admin:write"), s.handleAdmins)
+		api.DELETE("/admins/:id", s.requireAuth(), s.requirePerm("admin:delete"), s.handleAdminDelete)
+		api.POST("/admins/:id/disable", s.requireAuth(), s.requirePerm("admin:write"), s.handleAdminDisable)
+		api.POST("/admins/:id/password", s.requireAuth(), s.requirePerm("admin:write"), s.handleAdminPassword)
+		api.POST("/admins/:id/role", s.requireAuth(), s.requirePerm("admin:write"), s.handleAdminRole)
+
+		api.GET("/admin-roles", s.requireAuth(), s.requirePerm("admin_role:read"), s.handleAdminRoles)
+		api.POST("/admin-roles", s.requireAuth(), s.requirePerm("admin_role:write"), s.handleAdminRoles)
+		api.DELETE("/admin-roles", s.requireAuth(), s.requirePerm("admin_role:delete"), s.handleAdminRoleDelete)
+
 		api.GET("/chat-logs", s.requireAuth(), s.requirePerm("chat_log:read"), s.handleChatLogs)
 		api.GET("/llm-logs", s.requireAuth(), s.requirePerm("llm_log:read"), s.handleLLMLogs)
 		api.GET("/mcp-logs", s.requireAuth(), s.requirePerm("mcp_log:read"), s.handleMCPLogs)
-
-		api.GET("/admins", s.requireAuth(), s.requirePerm("admin:manage"), s.handleAdmins)
-		api.POST("/admins", s.requireAuth(), s.requirePerm("admin:manage"), s.handleAdmins)
-		api.DELETE("/admins/:id", s.requireAuth(), s.requirePerm("admin:manage"), s.handleAdminDelete)
-		api.POST("/admins/:id/disable", s.requireAuth(), s.requirePerm("admin:manage"), s.handleAdminDisable)
-		api.POST("/admins/:id/password", s.requireAuth(), s.requirePerm("admin:manage"), s.handleAdminPassword)
-		api.POST("/admins/:id/role", s.requireAuth(), s.requirePerm("admin:manage"), s.handleAdminRole)
 	}
 
-	r.GET("/admin", s.handlePage)
-	r.GET("/admin/*path", s.handlePage)
+	// Vue 后台管理构建产物：统一通过 /admin 和 /admin/* 提供，找不到的文件回退到 index.html。
+	if distFS, err := fs.Sub(web.Assets, "dist"); err == nil {
+		serveFile := func(path string) ([]byte, string, error) {
+			path = strings.TrimPrefix(path, "/")
+			if path == "" {
+				path = "index.html"
+			}
+			if strings.Contains(path, "..") {
+				path = "index.html"
+			}
+			data, err := fs.ReadFile(distFS, path)
+			if err != nil {
+				data, err = fs.ReadFile(distFS, "index.html")
+				if err != nil {
+					return nil, "", err
+				}
+				return data, "text/html; charset=utf-8", nil
+			}
+			contentType := "application/octet-stream"
+			switch {
+			case strings.HasSuffix(path, ".js"):
+				contentType = "application/javascript"
+			case strings.HasSuffix(path, ".css"):
+				contentType = "text/css"
+			case strings.HasSuffix(path, ".html"):
+				contentType = "text/html; charset=utf-8"
+			case strings.HasSuffix(path, ".png"):
+				contentType = "image/png"
+			case strings.HasSuffix(path, ".jpg"), strings.HasSuffix(path, ".jpeg"):
+				contentType = "image/jpeg"
+			case strings.HasSuffix(path, ".svg"):
+				contentType = "image/svg+xml"
+			case strings.HasSuffix(path, ".json"):
+				contentType = "application/json"
+			}
+			return data, contentType, nil
+		}
+		adminHandler := func(c *gin.Context) {
+			data, ct, err := serveFile(c.Param("path"))
+			if err != nil {
+				c.String(http.StatusNotFound, "page not found")
+				return
+			}
+			if strings.HasSuffix(ct, "html") {
+				c.Header("Cache-Control", "no-store")
+			} else {
+				c.Header("Cache-Control", "public, max-age=86400")
+			}
+			c.Data(http.StatusOK, ct, data)
+		}
+		r.GET("/admin", adminHandler)
+		r.GET("/admin/*path", adminHandler)
+	}
 	return r
 }
 
@@ -109,18 +201,35 @@ func genToken() string {
 func (s *Server) requireAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		tok := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
-		if tok != s.adminToken {
+		if tok == "" {
+			if cookie, err := c.Cookie("admin_token"); err == nil {
+				tok = cookie
+			}
+		}
+		s.sessionMu.RLock()
+		sess, ok := s.sessions[tok]
+		s.sessionMu.RUnlock()
+		if !ok || sess == nil {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "未授权，请先登录"})
 			c.Abort()
 			return
 		}
+		c.Set("admin_session", sess)
+		c.Set("admin_token", tok)
 		c.Next()
 	}
 }
 
 func (s *Server) requirePerm(perm string) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if !s.hasPermission(perm) {
+		sess, _ := c.Get("admin_session")
+		as, ok := sess.(*adminSession)
+		if !ok || as == nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "未授权，请先登录"})
+			c.Abort()
+			return
+		}
+		if !s.hasPermission(as, perm) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "当前角色无此操作权限"})
 			c.Abort()
 			return
@@ -129,21 +238,31 @@ func (s *Server) requirePerm(perm string) gin.HandlerFunc {
 	}
 }
 
-// hasPermission 检查当前登录管理员是否拥有指定权限。
-func (s *Server) hasPermission(perm string) bool {
-	if s.adminUser == nil {
+// hasPermission 检查管理员是否拥有指定权限。
+func (s *Server) hasPermission(as *adminSession, perm string) bool {
+	if as == nil {
 		return false
 	}
-	if s.adminUser.Role == "super_admin" || s.adminUser.ID == "default" {
+	if as.Role == "super_admin" || as.ID == "default" {
 		return true
 	}
-	roles, err := s.users.ListRoles()
-	if err != nil {
+	if s.users == nil {
 		return false
 	}
-	for _, r := range roles {
-		if r.Name == s.adminUser.Role {
-			return strings.Contains(r.Permissions, perm) || strings.Contains(r.Permissions, "admin:all")
+	return containsPerm(s.users.AdminRolePermissions(as.Role), perm)
+}
+
+func containsPerm(perms []string, perm string) bool {
+	if containsStr(perms, "admin:all") {
+		return true
+	}
+	return containsStr(perms, perm)
+}
+
+func containsStr(list []string, v string) bool {
+	for _, x := range list {
+		if strings.TrimSpace(x) == v {
+			return true
 		}
 	}
 	return false
@@ -155,6 +274,14 @@ func (s *Server) usersReady(c *gin.Context) bool {
 		return false
 	}
 	return true
+}
+
+func sessionFromCtx(c *gin.Context) *adminSession {
+	v, _ := c.Get("admin_session")
+	if s, ok := v.(*adminSession); ok {
+		return s
+	}
+	return nil
 }
 
 // ---- 登录 / 当前管理员 ----
@@ -172,9 +299,14 @@ func (s *Server) handleLogin(c *gin.Context) {
 	if s.users != nil {
 		admin, err := s.users.AdminLogin(req.Username, req.Password)
 		if err == nil && admin != nil {
-			s.adminUser = &adminSession{ID: admin.ID, Username: admin.Username, Role: admin.Role}
+			tok := genToken()
+			sess := &adminSession{ID: admin.ID, Username: admin.Username, Role: admin.Role}
+			s.sessionMu.Lock()
+			s.sessions[tok] = sess
+			s.sessionMu.Unlock()
+			c.SetCookie("admin_token", tok, 86400, "/", "", false, true)
 			c.JSON(http.StatusOK, gin.H{
-				"token": s.adminToken,
+				"token": tok,
 				"admin": gin.H{"id": admin.ID, "username": admin.Username, "role": admin.Role},
 			})
 			return
@@ -185,48 +317,74 @@ func (s *Server) handleLogin(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "账号或密码错误"})
 		return
 	}
-	s.adminUser = &adminSession{ID: "default", Username: user, Role: "super_admin"}
+	tok := genToken()
+	sess := &adminSession{ID: "default", Username: user, Role: "super_admin"}
+	s.sessionMu.Lock()
+	s.sessions[tok] = sess
+	s.sessionMu.Unlock()
+	c.SetCookie("admin_token", tok, 86400, "/", "", false, true)
 	c.JSON(http.StatusOK, gin.H{
-		"token": s.adminToken,
+		"token": tok,
 		"admin": gin.H{"id": "default", "username": user, "role": "super_admin"},
 	})
 }
 
+func (s *Server) handleLogout(c *gin.Context) {
+	tok, _ := c.Get("admin_token")
+	if t, ok := tok.(string); ok && t != "" {
+		s.sessionMu.Lock()
+		delete(s.sessions, t)
+		s.sessionMu.Unlock()
+	}
+	c.SetCookie("admin_token", "", -1, "/", "", false, true)
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
 func (s *Server) handleAdminMe(c *gin.Context) {
-	if s.adminUser == nil {
+	as := sessionFromCtx(c)
+	if as == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "未授权，请先登录"})
 		return
 	}
 	perms := []string{}
-	if s.adminUser.Role == "super_admin" || s.adminUser.ID == "default" {
+	if as.Role == "super_admin" || as.ID == "default" {
 		perms = []string{"admin:all"}
 	} else if s.users != nil {
-		roles, err := s.users.ListRoles()
-		if err == nil {
-			for _, r := range roles {
-				if r.Name == s.adminUser.Role {
-					for _, p := range strings.Split(r.Permissions, ",") {
-						p = strings.TrimSpace(p)
-						if p != "" {
-							perms = append(perms, p)
-						}
-					}
-					break
-				}
-			}
-		}
+		perms = s.users.AdminRolePermissions(as.Role)
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"id":          s.adminUser.ID,
-		"username":    s.adminUser.Username,
-		"role":        s.adminUser.Role,
+		"id":          as.ID,
+		"username":    as.Username,
+		"role":        as.Role,
 		"permissions": perms,
+	})
+}
+
+func (s *Server) handlePermissions(c *gin.Context) {
+	as := sessionFromCtx(c)
+	if as == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "未授权，请先登录"})
+		return
+	}
+	modules := map[string][]Permission{}
+	for _, p := range AdminPermissions {
+		modules[p.Module] = append(modules[p.Module], p)
+	}
+	myPerms := []string{"admin:all"}
+	if as.Role != "super_admin" && as.ID != "default" && s.users != nil {
+		myPerms = s.users.AdminRolePermissions(as.Role)
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"permissions": AdminPermissions,
+		"modules":     modules,
+		"mine":        myPerms,
 	})
 }
 
 // handleAdminChangePassword 修改当前登录管理员自己的密码。
 func (s *Server) handleAdminChangePassword(c *gin.Context) {
-	if s.adminUser == nil {
+	as := sessionFromCtx(c)
+	if as == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "未授权，请先登录"})
 		return
 	}
@@ -238,7 +396,7 @@ func (s *Server) handleAdminChangePassword(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "请求体解析失败"})
 		return
 	}
-	if s.adminUser.ID == "default" {
+	if as.ID == "default" {
 		_, pass := s.store.AdminCreds()
 		if body.OldPassword != pass {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "原密码错误"})
@@ -254,7 +412,12 @@ func (s *Server) handleAdminChangePassword(c *gin.Context) {
 	if !s.usersReady(c) {
 		return
 	}
-	if err := s.users.SetAdminPassword(s.adminUser.ID, body.NewPassword); err != nil {
+	// 校验原密码，避免任意管理员免密改他人/自己密码。
+	if _, err := s.users.AdminLogin(as.Username, body.OldPassword); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "原密码错误"})
+		return
+	}
+	if err := s.users.SetAdminPassword(as.ID, body.NewPassword); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -314,9 +477,52 @@ func (s *Server) handleReset(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true, "reset": true})
 }
 
+// handleMCPTest 后端实测远程 MCP 连接（同源，不受浏览器 CORS 限制）。
+// 可选传入 base_url/transport/api_key 覆盖当前配置，便于“先测试再保存”。
+// 复用与运行时一致的 mcpclient，确保测试结果等价于实际对接效果。
+func (s *Server) handleMCPTest(c *gin.Context) {
+	var req struct {
+		BaseURL   string            `json:"base_url"`
+		Transport string            `json:"transport"`
+		APIKey    string            `json:"api_key"`
+		Headers   map[string]string `json:"headers"`
+	}
+	_ = c.ShouldBindJSON(&req)
+
+	rc := s.ag.MCPRemoteConfig()
+	if req.BaseURL != "" {
+		rc.BaseURL = req.BaseURL
+	}
+	if req.Transport != "" {
+		rc.Transport = req.Transport
+	}
+	if req.APIKey != "" {
+		rc.APIKey = req.APIKey
+	}
+	if len(req.Headers) > 0 {
+		rc.Headers = req.Headers
+	}
+	if rc.BaseURL == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "未配置或未传入远程 MCP 地址 (mcp.base_url)"})
+		return
+	}
+	cli, err := mcpclient.StartRemote(rc)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"ok": false, "error": err.Error()})
+		return
+	}
+	defer cli.Close()
+	tools := cli.Tools()
+	names := make([]string, 0, len(tools))
+	for _, t := range tools {
+		names = append(names, t.Name)
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "tool_count": len(names), "tools": names})
+}
+
 // handlePage 返回内嵌的后台管理页面。
 func (s *Server) handlePage(c *gin.Context) {
-	data, err := web.Assets.ReadFile("assets/index.html")
+	data, err := web.Assets.ReadFile("dist/index.html")
 	if err != nil {
 		c.String(http.StatusNotFound, "page not found")
 		return
@@ -377,6 +583,17 @@ func (s *Server) handleUsers(c *gin.Context) {
 	default:
 		c.JSON(http.StatusMethodNotAllowed, gin.H{"error": "方法不支持"})
 	}
+}
+
+func (s *Server) handleUserDelete(c *gin.Context) {
+	if !s.usersReady(c) {
+		return
+	}
+	if err := s.users.DeleteUser(c.Param("id")); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 func (s *Server) handleUserDisable(c *gin.Context) {
@@ -698,6 +915,48 @@ func (s *Server) handleAdminRole(c *gin.Context) {
 		return
 	}
 	if err := s.users.SetAdminRole(c.Param("id"), body.Role); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// ---- 管理员角色 / 权限 ----
+
+func (s *Server) handleAdminRoles(c *gin.Context) {
+	if !s.usersReady(c) {
+		return
+	}
+	switch c.Request.Method {
+	case http.MethodGet:
+		roles, err := s.users.ListAdminRoles()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"roles": roles})
+	case http.MethodPost:
+		var req userdb.AdminRole
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "请求体解析失败"})
+			return
+		}
+		if err := s.users.UpsertAdminRole(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	default:
+		c.JSON(http.StatusMethodNotAllowed, gin.H{"error": "方法不支持"})
+	}
+}
+
+func (s *Server) handleAdminRoleDelete(c *gin.Context) {
+	if !s.usersReady(c) {
+		return
+	}
+	name := c.Query("name")
+	if err := s.users.DeleteAdminRole(name); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}

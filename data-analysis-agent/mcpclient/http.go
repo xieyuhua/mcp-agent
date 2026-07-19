@@ -32,6 +32,13 @@ type RemoteConfig struct {
 
 // StartRemote 连接远程 MCP 服务并完成握手。
 func StartRemote(cfg RemoteConfig) (*Client, error) {
+	// 地址以 /sse 结尾时，自动使用 SSE 传输（避免用户填了 sse 地址却误选 streamable-http）。
+	base := strings.ToLower(strings.TrimSpace(cfg.BaseURL))
+	if strings.HasSuffix(strings.TrimRight(base, "/"), "/sse") {
+		cfg.Transport = "sse"
+	}
+	// 地址智能补全：支持简写（如 8081/sse、127.0.0.1:8081/sse）。
+	cfg.BaseURL = NormalizeBaseURL(cfg.BaseURL, strings.ToLower(cfg.Transport) == "sse")
 	var t Transport
 	var err error
 	switch strings.ToLower(cfg.Transport) {
@@ -48,6 +55,41 @@ func StartRemote(cfg RemoteConfig) (*Client, error) {
 		return nil, err
 	}
 	return &Client{t: t}, nil
+}
+
+// normalizeBaseURL 对远程 MCP 地址做智能补全，提升配置友好度（对接 llama.cpp 等本地服务）：
+//   - 去除首尾空白；
+//   - 缺协议时默认补 http://（本地 MCP 服务几乎都是 http）；
+//   - 仅填端口（如 8081 或 8081/sse）时，自动补默认 host 127.0.0.1；
+//   - sse=true 时若地址末尾没有 /sse 路径，自动追加（便于直接填 8081 即可对接 llama.cpp）。
+//
+// 例：
+//
+//	8081/sse          -> http://127.0.0.1:8081/sse
+//	127.0.0.1:8081    -> http://127.0.0.1:8081
+//	127.0.0.1:8081/sse-> http://127.0.0.1:8081/sse
+//	http://host:9000/mcp -> http://host:9000/mcp（已有协议，原样保留）
+func NormalizeBaseURL(raw string, sse bool) string {
+	base := strings.TrimSpace(raw)
+	if base == "" {
+		return ""
+	}
+	// 仅端口或 端口/路径（以数字开头且不包含 host 分隔符）：补默认 host。
+	if base[0] >= '0' && base[0] <= '9' && !strings.Contains(base, ":") && !strings.Contains(base, ".") {
+		base = "127.0.0.1:" + base
+	}
+	// 缺协议：补 http://。
+	if !strings.Contains(base, "://") {
+		base = "http://" + base
+	}
+	// SSE 传输：自动补全 /sse 路径（llama.cpp 默认端点）。
+	if sse {
+		trimmed := strings.TrimRight(base, "/")
+		if !strings.HasSuffix(trimmed, "/sse") {
+			base = trimmed + "/sse"
+		}
+	}
+	return base
 }
 
 // rpcRequest JSON-RPC 请求。
@@ -342,7 +384,9 @@ func (t *sseTransport) readLoop(rc io.ReadCloser) {
 		dataLines = nil
 		switch eventName {
 		case "endpoint":
-			t.endpoint = raw
+			if raw != "" {
+				t.endpoint = raw
+			}
 		default:
 			var ev struct {
 				ID     json.RawMessage `json:"id"`
@@ -385,6 +429,9 @@ func (t *sseTransport) readLoop(rc io.ReadCloser) {
 		}
 		line, err := r.ReadString('\n')
 		if strings.HasPrefix(line, "event:") {
+			// 收到新的 event: 行时，先 flush 上一个尚未提交的事件（符合 SSE 规范：
+			// 事件以空行分隔，但部分实现会在 data 后紧跟下一个 event:，需在此兜底）。
+			flush()
 			eventName = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
 		} else if strings.HasPrefix(line, "data:") {
 			dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
@@ -441,10 +488,15 @@ func (t *sseTransport) Initialize() error {
 func (t *sseTransport) Tools() []ToolMeta { return t.tools }
 
 func (t *sseTransport) postURL() string {
-	if strings.HasPrefix(t.endpoint, "http") {
-		return t.endpoint
+	endpoint := t.endpoint
+	if endpoint == "" {
+		// 服务端未推送 endpoint 时，按 MCP SSE 规范默认向 /messages 发送请求。
+		endpoint = "/messages"
 	}
-	return joinURL(t.baseURL, t.endpoint)
+	if strings.HasPrefix(endpoint, "http") {
+		return endpoint
+	}
+	return joinURL(t.baseURL, endpoint)
 }
 
 func (t *sseTransport) Notify(method string, params interface{}) error {
@@ -522,13 +574,28 @@ func (t *sseTransport) Close() error {
 	return nil
 }
 
-// joinURL 把相对路径拼到 base 的 host 上。
+// joinURL 把相对路径拼到 base 的 host 根目录下（而非拼到 base 的完整路径之后）。
+// llama.cpp 等 SSE 服务在 /sse 端点下推送 endpoint: /messages?session_id=xxx（相对路径），
+// 该消息端点应与 /sse 同级（即 http://host/messages），而不是 http://host/sse/messages。
+// 因此相对路径需相对于 base 的“目录”（最后一个 / 之前的部分）拼接，而非直接追加到 base 末尾。
 func joinURL(base, rel string) string {
 	if strings.HasPrefix(rel, "http") {
 		return rel
 	}
-	if strings.HasSuffix(base, "/") {
-		return base + strings.TrimPrefix(rel, "/")
+	// 以 base 的最后一个 "/" 为界，取目录部分再拼接相对路径。
+	// 例：base="http://127.0.0.1:8081/sse"，rel="/messages?x=1"
+	//   -> "http://127.0.0.1:8081" + "/" + "messages?x=1"
+	idx := strings.LastIndex(base, "/")
+	if idx < 0 {
+		return rel
 	}
-	return base + "/" + strings.TrimPrefix(rel, "/")
+	dir := base[:idx]
+	rel = strings.TrimPrefix(rel, "/")
+	if dir == "" {
+		return rel
+	}
+	if strings.HasSuffix(dir, "/") {
+		return dir + rel
+	}
+	return dir + "/" + rel
 }

@@ -224,8 +224,9 @@ const (
 	KeyLLMTemperature = "llm.temperature"
 	KeyLLMMaxTokens   = "llm.max_tokens"
 	// MCP（local）
-	KeyMCPMode       = "mcp.mode"
-	KeyMCPServerPath = "mcp.server_path"
+	KeyMCPMode         = "mcp.mode"
+	KeyMCPLocalEnabled = "mcp.local_enabled"
+	KeyMCPServerPath   = "mcp.server_path"
 	KeyMCPDBDialect  = "mcp.db_dialect"
 	KeyMCPDBDSN      = "mcp.db_dsn"
 	KeyMCPMask       = "mcp.mask_enabled"
@@ -235,9 +236,11 @@ const (
 	KeyMCPUsername   = "mcp.username"
 	KeyMCPPassword   = "mcp.password"
 	// MCP（remote）
-	KeyMCPBaseURL   = "mcp.base_url"
-	KeyMCPTransport = "mcp.transport"
-	KeyMCPAPIKey    = "mcp.api_key"
+	KeyMCPRemoteEnabled = "mcp.remote_enabled"
+	KeyMCPBaseURL       = "mcp.base_url"
+	KeyMCPTransport     = "mcp.transport"
+	KeyMCPAPIKey        = "mcp.api_key"
+	KeyMCPHeaders       = "mcp.headers"
 	// MCP（额外对接的远程服务列表，JSON 数组）
 	KeyMCPExtra = "mcp.extra"
 	// Agent
@@ -274,9 +277,9 @@ const (
 func validKey(k string) bool {
 	switch k {
 	case KeyLLMProvider, KeyLLMBaseURL, KeyLLMModel, KeyLLMAPIKey, KeyLLMTemperature, KeyLLMMaxTokens,
-		KeyMCPMode, KeyMCPServerPath, KeyMCPDBDialect, KeyMCPDBDSN, KeyMCPMask, KeyMCPSeed,
+		KeyMCPMode, KeyMCPLocalEnabled, KeyMCPServerPath, KeyMCPDBDialect, KeyMCPDBDSN, KeyMCPMask, KeyMCPSeed,
 		KeyMCPSandbox, KeyMCPWorkDir,
-		KeyMCPUsername, KeyMCPPassword, KeyMCPBaseURL, KeyMCPTransport, KeyMCPAPIKey, KeyMCPExtra,
+		KeyMCPUsername, KeyMCPPassword, KeyMCPRemoteEnabled, KeyMCPBaseURL, KeyMCPTransport, KeyMCPAPIKey, KeyMCPHeaders, KeyMCPExtra,
 		KeyAgentMaxSteps, KeyAgentUseNative, KeyAgentMaxResultRows,
 		KeyAgentMemMaxHistory, KeyAgentMemSummaryThreshold, KeyAgentMemRecentKeep,
 		KeyLogSaveToFile, KeyLogDir,
@@ -303,7 +306,8 @@ func toItems(c *config.Config) []ConfigItem {
 		mk(KeyLLMAPIKey, c.LLM.APIKey, "API Key（openai 兼容需要）"),
 		mk(KeyLLMTemperature, f64(c.LLM.Temperature), "生成温度"),
 		mk(KeyLLMMaxTokens, itoa(c.LLM.MaxTokens), "单次生成最大 token"),
-		mk(KeyMCPMode, c.MCP.Mode, "MCP 对接模式：local | remote"),
+		mk(KeyMCPMode, c.MCP.Mode, "MCP 对接模式（兼容旧配置，新配置请用下方开关）"),
+		mk(KeyMCPLocalEnabled, b(c.MCP.LocalEnabled), "是否启用本地内置 MCP（mcp-data-server 子进程）"),
 		mk(KeyMCPServerPath, c.MCP.ServerPath, "本地 mcp-data-server 可执行文件路径"),
 		mk(KeyMCPDBDialect, c.MCP.DBDialect, "后端数据库类型：sqlite | mysql"),
 		mk(KeyMCPDBDSN, c.MCP.DBDsn, "后端数据库连接串"),
@@ -313,9 +317,11 @@ func toItems(c *config.Config) []ConfigItem {
 		mk(KeyMCPWorkDir, c.MCP.WorkDir, "文件工具根目录（沙箱模式限定在此；留空=进程工作目录）"),
 		mk(KeyMCPUsername, c.MCP.Username, "MCP 登录账号"),
 		mk(KeyMCPPassword, c.MCP.Password, "MCP 登录密码"),
-		mk(KeyMCPBaseURL, c.MCP.BaseURL, "远程 MCP 地址（remote 模式）"),
+		mk(KeyMCPRemoteEnabled, b(c.MCP.RemoteEnabled), "是否启用远程 MCP 服务（需配置远程地址）"),
+		mk(KeyMCPBaseURL, c.MCP.BaseURL, "远程 MCP 地址"),
 		mk(KeyMCPTransport, c.MCP.Transport, "远程传输方式：streamable-http | sse"),
 		mk(KeyMCPAPIKey, c.MCP.APIKey, "远程 MCP 鉴权 Key"),
+		mk(KeyMCPHeaders, marshalHeaders(c.MCP.Headers), "远程 MCP 额外请求头（JSON 对象，如 {\"X-Foo\":\"bar\"}；留空=不设置）"),
 		mk(KeyMCPExtra, marshalExtra(c.MCP.Extra), "额外对接的远程 MCP 服务列表（JSON 数组）"),
 		mk(KeyAgentMaxSteps, itoa(c.Agent.MaxSteps), "ReAct 最大推理步数"),
 		mk(KeyAgentUseNative, b(c.Agent.UseNativeTools), "是否使用原生工具调用"),
@@ -360,6 +366,8 @@ func applyItem(c *config.Config, key, value string) error {
 		c.LLM.MaxTokens = atoi(value)
 	case KeyMCPMode:
 		c.MCP.Mode = value
+	case KeyMCPLocalEnabled:
+		c.MCP.LocalEnabled = isTrue(value)
 	case KeyMCPServerPath:
 		c.MCP.ServerPath = value
 	case KeyMCPDBDialect:
@@ -378,12 +386,16 @@ func applyItem(c *config.Config, key, value string) error {
 		c.MCP.Username = value
 	case KeyMCPPassword:
 		c.MCP.Password = value
+	case KeyMCPRemoteEnabled:
+		c.MCP.RemoteEnabled = isTrue(value)
 	case KeyMCPBaseURL:
 		c.MCP.BaseURL = value
 	case KeyMCPTransport:
 		c.MCP.Transport = value
 	case KeyMCPAPIKey:
 		c.MCP.APIKey = value
+	case KeyMCPHeaders:
+		c.MCP.Headers = unmarshalHeaders(value)
 	case KeyMCPExtra:
 		c.MCP.Extra = unmarshalExtra(value)
 	case KeyAgentMaxSteps:
@@ -468,6 +480,31 @@ func unmarshalExtra(s string) []config.RemoteMCP {
 		return nil
 	}
 	return list
+}
+
+// marshalHeaders 序列化额外请求头为 JSON 字符串（空/无值存 "{}"）。
+func marshalHeaders(h map[string]string) string {
+	if len(h) == 0 {
+		return "{}"
+	}
+	b, err := json.Marshal(h)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
+
+// unmarshalHeaders 从 JSON 字符串解析额外请求头（解析失败返回空 map）。
+func unmarshalHeaders(s string) map[string]string {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "{}" {
+		return nil
+	}
+	var h map[string]string
+	if err := json.Unmarshal([]byte(s), &h); err != nil {
+		return nil
+	}
+	return h
 }
 
 func f64(v float64) string  { return strconv.FormatFloat(v, 'f', -1, 64) }

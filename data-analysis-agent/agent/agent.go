@@ -59,29 +59,25 @@ func New(cfg *config.Config) (*Agent, error) {
 	return a, nil
 }
 
-// initMCP 依据配置建立 MCP 连接（本地子进程或远程服务），并完成登录与表结构预加载。
+// initMCP 依据配置建立 MCP 连接。本地 MCP（内置 mcp-data-server 子进程）与远程 MCP
+// （HTTP 服务）为两套相互独立的对接，可各自独立开关：
+//   - 两者都开：本地作为主 MCP（builtin 模式：token 注入 + 工具名映射），远程并入额外 MCP 聚合；
+//   - 仅本地：本地作为主 MCP；
+//   - 仅远程：远程作为主 MCP（非 builtin）；
+//   - 都关：报错，要求至少启用其一。
 // 同时初始化 LLM 客户端与工具列表。可被 ApplyConfig 复用以热重建连接。
 func (a *Agent) initMCP(cfg *config.Config) error {
-	var mcp *mcpclient.Client
+	localOn, remoteOn := resolveMCPFlags(cfg.MCP)
+
+	var mainMCP *mcpclient.Client
 	var builtin bool
 	var err error
 
-	if strings.EqualFold(cfg.MCP.Mode, "remote") {
-		// 远程 MCP 服务对接（无需本地子进程）
-		builtin = false
-		logger.Infof("[agent] 使用远程 MCP 对接: %s (transport=%s)", cfg.MCP.BaseURL, transportName(cfg.MCP.Transport))
-		mcp, err = mcpclient.StartRemote(mcpclient.RemoteConfig{
-			BaseURL:   cfg.MCP.BaseURL,
-			Transport: cfg.MCP.Transport,
-			APIKey:    cfg.MCP.APIKey,
-			Headers:   cfg.MCP.Headers,
-			Timeout:   30 * time.Second,
-		})
-	} else {
-		// 本地内置 mcp-data-server 子进程
+	if localOn {
+		// 本地内置 mcp-data-server 始终作为主 MCP（builtin 模式）。
 		builtin = true
-		logger.Infof("[agent] 使用本地内置 MCP 对接: %s", cfg.MCP.ServerPath)
-		mcp, err = mcpclient.Start(mcpclient.StartConfig{
+		logger.Infof("[agent] 启用本地内置 MCP 对接: %s", cfg.MCP.ServerPath)
+		mainMCP, err = mcpclient.Start(mcpclient.StartConfig{
 			ServerPath:     cfg.MCP.ServerPath,
 			DBDialect:      cfg.MCP.DBDialect,
 			DBDsn:          cfg.MCP.DBDsn,
@@ -91,12 +87,28 @@ func (a *Agent) initMCP(cfg *config.Config) error {
 			WorkDir:        cfg.MCP.WorkDir,
 			SandboxEnabled: cfg.MCP.SandboxEnabled,
 		})
-	}
-	if err != nil {
-		return err
+		if err != nil {
+			return err
+		}
+	} else if remoteOn {
+		// 仅远程：远程作为主 MCP（非 builtin）。
+		builtin = false
+		logger.Infof("[agent] 仅启用远程 MCP 对接: %s (transport=%s)", cfg.MCP.BaseURL, transportName(cfg.MCP.Transport))
+		mainMCP, err = mcpclient.StartRemote(mcpclient.RemoteConfig{
+			BaseURL:   cfg.MCP.BaseURL,
+			Transport: cfg.MCP.Transport,
+			APIKey:    cfg.MCP.APIKey,
+			Headers:   cfg.MCP.Headers,
+			Timeout:   30 * time.Second,
+		})
+		if err != nil {
+			return err
+		}
+	} else {
+		return fmt.Errorf("MCP 未启用：请至少开启本地或远程 MCP 之一（mcp.local_enabled / mcp.remote_enabled）")
 	}
 
-	a.mcp = mcp
+	a.mcp = mainMCP
 	a.builtin = builtin
 	a.llm = llm.NewClient(cfg.LLM.Provider, cfg.LLM.BaseURL, cfg.LLM.Model, cfg.LLM.APIKey, cfg.LLM.Temperature, cfg.LLM.MaxTokens)
 	a.llm.OnLog = a.buildLLMLogCallback()
@@ -104,13 +116,14 @@ func (a *Agent) initMCP(cfg *config.Config) error {
 	// 内置模式：登录获取 token（后续所有 MCP 工具调用都需要）
 	if builtin {
 		if err := a.login(); err != nil {
-			mcp.Close()
+			mainMCP.Close()
 			return err
 		}
 	}
 
 	// 连接额外对接的远程 MCP 服务（可选，多个并存）。
-	a.connectExtraMCPs(cfg)
+	// 当本地已作为主 MCP 且远程也开启时，把主远程服务也并入额外列表一并聚合。
+	a.connectExtraMCPs(cfg, localOn && remoteOn)
 
 	// 定义暴露给大模型的工具
 	a.tools = a.buildTools()
@@ -122,6 +135,21 @@ func (a *Agent) initMCP(cfg *config.Config) error {
 		a.schema = ""
 	}
 	return nil
+}
+
+// resolveMCPFlags 返回本地/远程 MCP 的实际开关状态。
+// 兼容旧配置：当两个开关都为 false 时，按 Mode 决定（local=仅本地，remote=仅远程）。
+func resolveMCPFlags(m config.MCPConfig) (localOn, remoteOn bool) {
+	localOn = m.LocalEnabled
+	remoteOn = m.RemoteEnabled
+	if !localOn && !remoteOn {
+		if strings.EqualFold(m.Mode, "remote") {
+			remoteOn = true
+		} else {
+			localOn = true
+		}
+	}
+	return
 }
 
 // SetCallLogStore 设置调用日志存储（HTTP 服务模式下注入 userdb）。
@@ -178,6 +206,8 @@ func transportName(t string) string {
 // mcpConfigChanged 判断两份 MCP 配置在影响连接的字段上是否不同（决定是否重建连接）。
 func mcpConfigChanged(a, b config.MCPConfig) bool {
 	return a.Mode != b.Mode ||
+		a.LocalEnabled != b.LocalEnabled ||
+		a.RemoteEnabled != b.RemoteEnabled ||
 		a.ServerPath != b.ServerPath ||
 		a.DBDialect != b.DBDialect ||
 		a.DBDsn != b.DBDsn ||
@@ -240,7 +270,9 @@ func (a *Agent) login() error {
 }
 
 // connectExtraMCPs 连接配置中声明的额外远程 MCP 服务（失败仅告警，不阻断启动）。
-func (a *Agent) connectExtraMCPs(cfg *config.Config) {
+// includeMainRemote=true 时，主远程 MCP（cfg.MCP.BaseURL）也会并入额外列表
+// （用于“本地+远程同时开启”场景：本地是主 MCP，远程作为额外 MCP 聚合工具）。
+func (a *Agent) connectExtraMCPs(cfg *config.Config, includeMainRemote bool) {
 	// 关闭旧连接，避免热更新时泄漏。
 	for _, em := range a.extraMCPs {
 		if em.client != nil {
@@ -248,6 +280,30 @@ func (a *Agent) connectExtraMCPs(cfg *config.Config) {
 		}
 	}
 	a.extraMCPs = nil
+
+	// 主远程 MCP（仅当本地已作为主 MCP 时并入）。
+	if includeMainRemote && strings.TrimSpace(cfg.MCP.BaseURL) != "" {
+		cli, err := mcpclient.StartRemote(mcpclient.RemoteConfig{
+			BaseURL:   cfg.MCP.BaseURL,
+			Transport: cfg.MCP.Transport,
+			APIKey:    cfg.MCP.APIKey,
+			Headers:   cfg.MCP.Headers,
+			Timeout:   30 * time.Second,
+		})
+		if err != nil {
+			logger.Warnf("[agent] 主远程 MCP 连接失败（已跳过）: %v", err)
+		} else {
+			logger.Infof("[agent] 已对接主远程 MCP: %s，发现 %d 个工具: %s", cfg.MCP.BaseURL, len(cli.Tools()), func() string {
+				names := make([]string, 0, len(cli.Tools()))
+				for _, t := range cli.Tools() {
+					names = append(names, t.Name)
+				}
+				return strings.Join(names, ", ")
+			}())
+			a.extraMCPs = append(a.extraMCPs, &extraMCP{name: "remote", client: cli})
+		}
+	}
+
 	for _, m := range cfg.MCP.Extra {
 		if strings.TrimSpace(m.BaseURL) == "" {
 			continue
@@ -736,6 +792,22 @@ type StreamEvent struct {
 	Error  string          `json:"error,omitempty"`  // EventError 时携带错误信息
 }
 
+// MCPRemoteConfig 返回当前生效的远程 MCP 对接配置（供后端代理/测试接口使用）。
+// 调用方通过它把浏览器侧的 MCP 请求经本服务同源转发，绕开远端服务缺失 CORS 头的问题。
+func (a *Agent) MCPRemoteConfig() mcpclient.RemoteConfig {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	// 地址智能补全（如 8081/sse、127.0.0.1:8081/sse），使代理转发也能直接使用简写配置。
+	baseURL := mcpclient.NormalizeBaseURL(a.cfg.MCP.BaseURL, strings.ToLower(a.cfg.MCP.Transport) == "sse")
+	return mcpclient.RemoteConfig{
+		BaseURL:   baseURL,
+		Transport: a.cfg.MCP.Transport,
+		APIKey:    a.cfg.MCP.APIKey,
+		Headers:   a.cfg.MCP.Headers,
+		Timeout:   30 * time.Second,
+	}
+}
+
 // LLMInfo 返回当前生效的 LLM 配置摘要，供前端"基础设置"初始化。
 func (a *Agent) LLMInfo() map[string]interface{} {
 	a.mu.Lock()
@@ -1083,12 +1155,18 @@ func (a *Agent) logContext(opts *AskOptions) *llm.LogContext {
 // buildLLMLogCallback 构造 LLM 调用日志回调，把请求/响应写入调用日志存储。
 func (a *Agent) buildLLMLogCallback() func(logCtx *llm.LogContext, reqInfo map[string]interface{}, respText string, duration time.Duration, errMsg string) {
 	return func(logCtx *llm.LogContext, reqInfo map[string]interface{}, respText string, duration time.Duration, errMsg string) {
-		if a.callLogStore == nil || logCtx == nil {
+		if a.callLogStore == nil {
 			return
 		}
+		// 允许无用户上下文（如 CLI / 内部调用）时也记录日志，仅以空串兜底 userID/convID，
+		// 确保 LLM 调用日志始终落库，不再因 logCtx 为 nil 而整条丢失。
+		userID, convID := "", ""
+		if logCtx != nil {
+			userID, convID = logCtx.UserID, logCtx.ConversationID
+		}
 		_ = a.callLogStore.InsertLLMCallLog(
-			logCtx.UserID,
-			logCtx.ConversationID,
+			userID,
+			convID,
 			getStr(reqInfo, "model"),
 			getStr(reqInfo, "provider"),
 			marshal(reqInfo["messages"]),
@@ -1143,11 +1221,24 @@ func (a *Agent) executeTool(userID, convID string, tc llm.ToolCall, result *AskR
 	}
 	toolStart := time.Now()
 	text, err := run(userID, convID, args, result, onProgress)
+	durationMs := time.Since(toolStart).Milliseconds()
 	if err != nil {
+		a.logMCPCall(userID, convID, tc.Name, a.serverNameOf(tc.Name), marshal(args), text, durationMs, false, err.Error())
 		return "工具执行失败: " + err.Error()
 	}
-	_ = toolStart
+	a.logMCPCall(userID, convID, tc.Name, a.serverNameOf(tc.Name), marshal(args), text, durationMs, false, "")
 	return text
+}
+
+// serverNameOf 返回提供某工具的服务名（用于 MCP 调用日志的 server_name 字段）。
+// 优先查额外 MCP 路由表；主 MCP（本地/远程主服务）记为 "main"。
+func (a *Agent) serverNameOf(toolName string) string {
+	if a.toolRoute != nil {
+		if _, ok := a.toolRoute[toolName]; ok {
+			return "extra"
+		}
+	}
+	return "main"
 }
 
 // parseRows 尝试把工具返回文本解析为行数据（JSON 数组）。

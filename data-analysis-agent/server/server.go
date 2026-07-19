@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -63,6 +65,12 @@ func (s *Server) buildRouter() *gin.Engine {
 		api.PATCH("/conversations/:id", s.handleConversationRename)
 		api.GET("/conversations/:id/messages", s.handleConversationMessages)
 	}
+
+	// MCP 反向代理：把浏览器侧对远程 MCP 服务（如 llama.cpp）的请求经本服务同源转发，
+	// 绕开远端服务未返回 CORS 头导致的“Failed to fetch (check CORS?)”问题。
+	// 仅转发到后台已配置的 mcp.base_url（服务端可控，避免被当作开放代理）。
+	r.Any("/api/mcp-proxy", s.handleMCPProxy)
+	r.Any("/api/mcp-proxy/*path", s.handleMCPProxy)
 
 	// 聊天前端页面（自包含，无需前端构建）。
 	r.GET("/ui", s.handleUI)
@@ -149,6 +157,71 @@ func (s *Server) handleHealth(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
+// handleMCPProxy 把请求同源转发到后台配置的远程 MCP 服务（mcp.base_url）。
+// 浏览器侧 MCP 客户端（如 MCP Inspector、配置页测试）只需访问本服务的
+// http://<本服务地址>/api/mcp-proxy，即可绕过远端服务缺失 CORS 头的问题。
+// 仅转发到已配置的 mcp.base_url，避免成为开放代理（SSRF 防护）。
+func (s *Server) handleMCPProxy(c *gin.Context) {
+	rc := s.ag.MCPRemoteConfig()
+	if rc.BaseURL == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "未配置远程 MCP 地址 (mcp.base_url)，无法代理"})
+		return
+	}
+	target, err := url.Parse(rc.BaseURL)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "远程 MCP 地址解析失败: " + err.Error()})
+		return
+	}
+	// 保留代理前缀之后的子路径（如 /api/mcp-proxy/see -> 目标 /mcp 后的 /see），
+	// 使远端多个 MCP 端点（/mcp、/see 等）都能经本服务同源访问。
+	suffix := strings.TrimPrefix(c.Request.URL.Path, "/api/mcp-proxy")
+	if suffix == "" {
+		suffix = "/"
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.Director = func(req *http.Request) {
+		req.URL.Scheme = target.Scheme
+		req.URL.Host = target.Host
+		req.URL.Path = singleJoinPath(target.Path, suffix)
+		// 优先保留浏览器侧传入的查询参数，否则回退到目标地址自带参数。
+		if req.URL.RawQuery == "" {
+			req.URL.RawQuery = target.RawQuery
+		}
+		req.Host = target.Host
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		if rc.APIKey != "" {
+			req.Header.Set("Authorization", "Bearer "+rc.APIKey)
+		}
+		for k, v := range rc.Headers {
+			req.Header.Set(k, v)
+		}
+	}
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, e error) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"error":"代理到远程 MCP 失败: ` + e.Error() + `"}`))
+	}
+	proxy.ServeHTTP(c.Writer, c.Request)
+}
+
+// singleJoinPath 将远端基础路径与目标子路径拼接为单个合法路径，
+// 避免重复或缺失斜杠（如 "/mcp" + "/see" -> "/mcp/see"，"/mcp" + "/" -> "/mcp/"）。
+func singleJoinPath(base, suffix string) string {
+	if suffix == "" {
+		return base
+	}
+	if !strings.HasPrefix(suffix, "/") {
+		suffix = "/" + suffix
+	}
+	if base == "" || base == "/" {
+		return suffix
+	}
+	if strings.HasSuffix(base, "/") {
+		return base + strings.TrimPrefix(suffix, "/")
+	}
+	return base + suffix
+}
+
 // handleUIConfig 返回后台统一配置的前端展示开关（公开接口，无需登录）。
 func (s *Server) handleUIConfig(c *gin.Context) {
 	ui := s.ag.UIConfig()
@@ -220,11 +293,9 @@ func (s *Server) handleAsk(c *gin.Context) {
 	})
 }
 
-// buildAskOpts 组装单次提问的可选覆盖项；全空时返回 nil（沿用运行配置）。
+// buildAskOpts 组装单次提问的可选覆盖项；始终返回非 nil 的 *agent.AskOptions，
+// 全空时返回空结构体（沿用运行配置），避免调用方在 nil 上解引用导致 panic。
 func buildAskOpts(model string, temperature float64, maxTokens int, enableChart *bool, userPrompt string) *agent.AskOptions {
-	if model == "" && temperature <= 0 && maxTokens <= 0 && enableChart == nil && userPrompt == "" {
-		return nil
-	}
 	opts := &agent.AskOptions{
 		Model:       model,
 		Temperature: temperature,
