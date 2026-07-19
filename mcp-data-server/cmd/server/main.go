@@ -87,7 +87,7 @@ func main() {
 
 	switch strings.ToLower(cfg.Transport) {
 	case "http":
-		if err := startHTTP(ctx, cfg, mcpServer, authSvc, permSvc); err != nil && ctx.Err() == nil {
+		if err := startHTTP(ctx, cfg, mcpServer, authSvc, permSvc, toolHandler); err != nil && ctx.Err() == nil {
 			log.Fatalf("http server: %v", err)
 		}
 	case "both":
@@ -102,7 +102,7 @@ func main() {
 		}()
 		go func() {
 			defer wg.Done()
-			if err := startHTTP(ctx, cfg, mcpServer, authSvc, permSvc); err != nil && ctx.Err() == nil {
+			if err := startHTTP(ctx, cfg, mcpServer, authSvc, permSvc, toolHandler); err != nil && ctx.Err() == nil {
 				log.Printf("http server error: %v", err)
 				cancel()
 			}
@@ -145,13 +145,16 @@ func startStdio(ctx context.Context, mcpServer *mcpserver.MCPServer) error {
 }
 
 // startHTTP 启动 HTTP 传输（MCP over streamable-http + 权限后台 + 内嵌 Web），阻塞到 ctx 取消。
-func startHTTP(ctx context.Context, cfg *config.Config, mcpServer *mcpserver.MCPServer, authSvc *service.AuthService, permSvc *service.PermissionService) error {
+func startHTTP(ctx context.Context, cfg *config.Config, mcpServer *mcpserver.MCPServer, authSvc *service.AuthService, permSvc *service.PermissionService, toolHandler *handler.ToolHandler) error {
 	addr := cfg.HTTPAddr
 	if addr == "" {
 		addr = ":8081"
 	}
 
-	httpSrv := mcpserver.NewStreamableHTTPServer(mcpServer, mcpserver.WithEndpointPath("/mcp"))
+	httpSrv := mcpserver.NewStreamableHTTPServer(mcpServer,
+		mcpserver.WithEndpointPath("/mcp"),
+		mcpserver.WithStateLess(true), // llama.cpp 客户端目前不携带 Mcp-Session-Id，使用无状态模式
+	)
 	// SSE 服务端：标准 MCP 旧版 SSE 传输（GET /sse 建立接收流 + POST /messages 发送请求），
 	// 供 llama.cpp 等以 SSE 方式对接的 MCP 客户端连接（如 llama.cpp 的 --mcp-server sse://host:8081/sse）。
 	// 复用同一个 mcpServer 实例，工具清单与鉴权逻辑完全一致。
@@ -161,6 +164,7 @@ func startHTTP(ctx context.Context, cfg *config.Config, mcpServer *mcpserver.MCP
 		mcpserver.WithSSEDisableLocalhostProtection(true),
 	)
 	adminSrv := admin.New(authSvc, permSvc)
+	llamaHandler := handler.NewLlamaToolHandler(toolHandler)
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
@@ -171,6 +175,23 @@ func startHTTP(ctx context.Context, cfg *config.Config, mcpServer *mcpserver.MCP
 	r.Any("/sse", gin.WrapH(sseSrv))
 	r.Any("/messages", gin.WrapH(sseSrv))
 	r.Any("/api/admin/*path", gin.WrapH(adminSrv.Handler()))
+	// llama.cpp 网页兼容层：OpenAI 风格 function calling 工具列表与调用。
+	r.GET("/api/llama/tools", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"tools": llamaHandler.ListTools()})
+	})
+	r.POST("/api/llama/tools/call", func(c *gin.Context) {
+		var req handler.LlamaToolCallRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		res, err := llamaHandler.CallTool(c.Request.Context(), req)
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"result": res})
+	})
 	r.GET("/", gin.WrapH(web.StaticHandler(cfg.WebDir)))
 	r.NoRoute(gin.WrapH(web.StaticHandler(cfg.WebDir)))
 
@@ -201,9 +222,12 @@ func startHTTP(ctx context.Context, cfg *config.Config, mcpServer *mcpserver.MCP
 
 func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
-		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id")
+	c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+	c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+	// llama.cpp 网页客户端会在 preflight 时把 access-control-allow-origin 等当作请求头发出，
+	// 必须全部放行，否则浏览器报 "not allowed by Access-Control-Allow-Headers"。
+	c.Writer.Header().Set("Access-Control-Allow-Headers",
+		"Content-Type, Authorization, Mcp-Session-Id, mcp-protocol-version, Accept, access-control-allow-origin, Origin, X-Requested-With")
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(http.StatusNoContent)
 			return
