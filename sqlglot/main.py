@@ -1,5 +1,5 @@
 """
-SQL 解析 API 服务 —— 基于 sqlglot
+SQL 解析 API 服务(REST) —— 基于 sqlglot
 
 提供以下能力:
   1. /parse      将 SQL 解析为结构化 AST(JSON)
@@ -8,6 +8,8 @@ SQL 解析 API 服务 —— 基于 sqlglot
   4. /validate   校验 SQL 语法是否合法
   5. /extract    提取 SQL 中的表名、列名、函数调用等信息
   6. /dialects   列出 sqlglot 支持的所有方言
+
+核心逻辑位于 core.py, 与 gRPC 服务(grpc_server.py) 共享复用。
 
 运行:
     pip install -r requirements.txt
@@ -18,10 +20,11 @@ SQL 解析 API 服务 —— 基于 sqlglot
 
 from __future__ import annotations
 
-import sqlglot
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+
+import core
 
 app = FastAPI(
     title="SQL 解析 API",
@@ -38,7 +41,7 @@ app.add_middleware(
 
 
 # --------------------------------------------------------------------------- #
-# 请求 / 响应模型
+# 请求模型
 # --------------------------------------------------------------------------- #
 class ParseRequest(BaseModel):
     sql: str = Field(..., description="待解析的 SQL 语句", examples=["SELECT a, b FROM t WHERE a > 1"])
@@ -69,116 +72,56 @@ class ExtractRequest(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
-# 工具函数
-# --------------------------------------------------------------------------- #
-def _resolve_dialect(dialect: str | None) -> str | None:
-    """校验方言是否受支持, 返回规范后的方言名(大写)."""
-    if not dialect:
-        return None
-    try:
-        # sqlglot.Dialects 在较新版本提供; 旧版本用 str 即可
-        return sqlglot.Dialect.get_or_raise(dialect).get_name() if hasattr(sqlglot.Dialect, "get_or_raise") else dialect
-    except Exception:
-        return dialect
-
-
-# --------------------------------------------------------------------------- #
 # 接口
 # --------------------------------------------------------------------------- #
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "sqlglot_version": sqlglot.__version__}
+    return {"status": "ok", "sqlglot_version": core.sqlglot_version()}
 
 
 @app.get("/dialects")
 def dialects() -> dict:
-    """列出所有受支持的方言."""
-    try:
-        names = [d for d in sqlglot.Dialect.classes() if d]
-    except Exception:
-        names = list(sqlglot.dialects.Dialects.__members__.keys()) if hasattr(sqlglot, "dialects") else []
-    return {"dialects": sorted(names)}
+    return {"dialects": core.list_dialects()}
 
 
 @app.post("/parse")
 def parse(req: ParseRequest) -> dict:
     try:
-        expression = sqlglot.parse_one(req.sql, read=req.read)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=400, detail=f"解析失败: {exc}") from exc
-    return {
-        "sql": req.sql,
-        "dialect": req.read,
-        "ast": expression.sql(pretty=False) if req.pretty else str(expression),
-        "tree": expression.repr() if hasattr(expression, "repr") else None,
-        "json": expression.dump() if hasattr(expression, "dump") else None,
-    }
+        return core.parse(req.sql, read=req.read, pretty=req.pretty)
+    except core.SqlError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/transpile")
 def transpile(req: TranspileRequest) -> dict:
     try:
-        out = sqlglot.transpile(req.sql, read=req.read, write=req.write)[0]
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=400, detail=f"转译失败: {exc}") from exc
+        out = core.transpile(req.sql, write=req.write, read=req.read)
+    except core.SqlError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"read": req.read, "write": req.write, "sql": req.sql, "transpiled": out}
 
 
 @app.post("/format")
 def format_sql(req: FormatRequest) -> dict:
     try:
-        out = sqlglot.transpile(req.sql, read=req.read, write=req.write or req.read)[0]
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=400, detail=f"格式化失败: {exc}") from exc
+        out = core.format_sql(req.sql, read=req.read, write=req.write)
+    except core.SqlError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"sql": req.sql, "formatted": out}
 
 
 @app.post("/validate")
 def validate(req: ValidateRequest) -> dict:
-    try:
-        sqlglot.parse_one(req.sql, read=req.read)
-    except Exception as exc:  # noqa: BLE001
-        return {"valid": False, "error": str(exc)}
-    return {"valid": True, "error": None}
+    valid, error = core.validate(req.sql, read=req.read)
+    return {"valid": valid, "error": error}
 
 
 @app.post("/extract")
 def extract(req: ExtractRequest) -> dict:
     try:
-        expression = sqlglot.parse_one(req.sql, read=req.read)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=400, detail=f"解析失败: {exc}") from exc
-
-    tables, columns, functions, ctes = set(), set(), set(), set()
-
-    for node in expression.walk():
-        t = type(node).__name__
-        # 表名
-        if t in ("Table", "Schema"):
-            if hasattr(node, "this") and getattr(node, "this") is not None:
-                name = getattr(node.this, "this", None)
-                if name is not None:
-                    tables.add(str(name))
-        # 列引用
-        if t == "Column":
-            col = getattr(node, "this", None)
-            if col is not None:
-                columns.add(str(col))
-        # 函数调用
-        if t == "Func":
-            functions.add(node.sql(req.read))
-        # CTE
-        if t == "CTE":
-            alias = getattr(node, "alias", None)
-            if alias is not None:
-                ctes.add(str(alias))
-
-    return {
-        "tables": sorted(tables),
-        "columns": sorted(columns),
-        "functions": sorted(functions),
-        "ctes": sorted(ctes),
-    }
+        return core.extract(req.sql, read=req.read)
+    except core.SqlError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 if __name__ == "__main__":

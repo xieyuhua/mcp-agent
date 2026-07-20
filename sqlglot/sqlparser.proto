@@ -1,0 +1,86 @@
+syntax = "proto3";
+
+package sqlparser;
+
+// SQL 解析服务 —— 基于 sqlglot
+service SqlParser {
+  // 健康检查
+  rpc Health (HealthRequest) returns (HealthReply);
+  // 列出支持的方言
+  rpc Dialects (DialectsRequest) returns (DialectsReply);
+  // 解析为 AST
+  rpc Parse (ParseRequest) returns (ParseReply);
+  // 方言互转
+  rpc Transpile (TranspileRequest) returns (TranspileReply);
+  // 格式化
+  rpc Format (FormatRequest) returns (FormatReply);
+  // 语法校验
+  rpc Validate (ValidateRequest) returns (ValidateReply);
+  // 提取元数据
+  rpc Extract (ExtractRequest) returns (ExtractReply);
+}
+
+message HealthRequest {}
+message HealthReply {
+  string status = 1;
+  string sqlglot_version = 2;
+}
+
+message DialectsRequest {}
+message DialectsReply {
+  repeated string dialects = 1;
+}
+
+message ParseRequest {
+  string sql = 1;
+  string read = 2;    // 输入方言, 留空自动识别
+  bool pretty = 3;
+}
+message ParseReply {
+  string sql = 1;
+  string dialect = 2;
+  string ast = 3;
+  string json = 4;    // AST 的 JSON 字符串
+}
+
+message TranspileRequest {
+  string sql = 1;
+  string read = 2;    // 输入方言, 留空自动识别
+  string write = 3;   // 目标方言
+}
+message TranspileReply {
+  string read = 1;
+  string write = 2;
+  string sql = 3;
+  string transpiled = 4;
+}
+
+message FormatRequest {
+  string sql = 1;
+  string read = 2;
+  string write = 3;
+}
+message FormatReply {
+  string sql = 1;
+  string formatted = 2;
+}
+
+message ValidateRequest {
+  string sql = 1;
+  string read = 2;
+}
+message ValidateReply {
+  bool valid = 1;
+  string error = 2;
+}
+
+message ExtractRequest {
+  string sql = 1;
+  string read = 2;
+}
+message ExtractReply {
+  repeated string tables = 1;
+  repeated string columns = 2;
+  repeated string functions = 3;
+  repeated string ctes = 4;
+}
