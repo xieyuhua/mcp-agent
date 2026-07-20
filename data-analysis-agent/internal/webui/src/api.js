@@ -2,7 +2,7 @@ const BASE = '/api'
 
 async function json(method, url, body) {
   const h = { 'Content-Type': 'application/json' }
-  const tok = localStorage.getItem('token')
+  const tok = localStorage.getItem('daa_token')
   if (tok) h['Authorization'] = 'Bearer ' + tok
   const opts = { method, headers: h }
   if (body != null) opts.body = JSON.stringify(body)
@@ -42,7 +42,7 @@ export const uiConfig = () => json('GET', '/ui-config')
 
 export function askStream(question, convId, opts, onEvent) {
   const body = { question, conversation_id: convId, ...opts }
-  const tok = localStorage.getItem('token')
+  const tok = localStorage.getItem('daa_token')
   return fetch(BASE + '/ask', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream', ...(tok ? { 'Authorization': 'Bearer ' + tok } : {}) },

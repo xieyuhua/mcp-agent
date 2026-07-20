@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, nextTick, onMounted, onUnmounted } from 'vue'
 import { auth, health, conversations, user as userAPI, uiConfig, askStream } from './api'
+import LoginView from './components/LoginView.vue'
 import { watch } from 'vue'
 
 const token = ref(localStorage.getItem('daa_token') || '')
@@ -27,10 +28,6 @@ const allQuestions = ref([])
 
 // auth overlay
 const authOpen = ref(false)
-const authMode = ref('login')
-const authUser = ref('')
-const authPass = ref('')
-const authErr = ref('')
 
 const SETTINGS_KEY = 'daa_settings'
 const saved = (() => { try { return JSON.parse(localStorage.getItem(SETTINGS_KEY)) } catch(e) { return null } })() || {}
@@ -134,6 +131,19 @@ function applyTheme(t, skipSave) {
   if (!skipSave && t) { settings.value.theme = t; saveSettings() }
 }
 
+function resetSettings() {
+  settings.value = { model: '', temperature: 0, max_tokens: 0, showSteps: true, enableChart: true, showDuration: true, theme: 'auto', auto: true, mode: 'react' }
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings.value))
+  applyTheme('auto')
+}
+
+function saveSettingsDrawer() {
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings.value))
+  applyTheme(settings.value.theme)
+  settingsOpen.value = false
+  userAPI.prompt.set(userPrompt.value).catch(() => {})
+}
+
 function workflowSummary() {
   const steps = (globalUI.value.workflow_steps || '').split(/[→]/).map(s => s.trim()).filter(Boolean)
   return steps.length ? steps.join(' → ') : '用自然语言提问，我会自动生成 SQL、经 MCP 权限校验后查询数据库，并在合适时生成图表。'
@@ -158,27 +168,13 @@ async function loadGlobalUI() {
 }
 
 function showAuth(show) { authOpen.value = show }
-function setAuthMode(mode) { authMode.value = mode; authErr.value = '' }
 
-async function doAuth() {
-  const u = authUser.value.trim()
-  const p = authPass.value
-  authErr.value = ''
-  if (u.length < 2) { authErr.value = '用户名至少2位'; return }
-  if (p.length < 4) { authErr.value = '密码至少4位'; return }
-  try {
-    const res = await fetch(authMode.value === 'login' ? '/api/login' : '/api/register', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: u, password: p })
-    })
-    const d = await res.json()
-    if (!res.ok) throw new Error(d.error || '认证失败')
-    token.value = d.token
-    localStorage.setItem('daa_token', d.token)
-    currentUser.value = d.user
-    showAuth(false)
-    afterLogin()
-  } catch (e) { authErr.value = e.message }
+function onLogin(tok, user) {
+  token.value = tok
+  localStorage.setItem('daa_token', tok)
+  currentUser.value = user
+  authOpen.value = false
+  afterLogin()
 }
 
 async function afterLogin() {
@@ -497,23 +493,17 @@ async function send() {
   if (userPrompt.value) body.user_prompt = userPrompt.value
 
   // Create assistant row upfront so steps + answer appear in a single bubble
-  const msg = messages.value[messages.value.length - 1]
-  if (!msg || msg.role === 'user') {
-    const newMsg = { role: 'assistant', content: '', streaming: true, stepsCount: 0 }
-    messages.value.push(newMsg)
-  }
-  const lastMsg = messages.value[messages.value.length - 1]
-  if (!lastMsg._rowCreated) {
-    lastMsg._rowCreated = true
-    const row = buildAssistantRow({ answer: '' })
-    chatEl.value.appendChild(row)
-    lastMsg._row = row
-    lastMsg._bubble = row.querySelector('.bubble')
-    lastMsg._mdEl = row.querySelector('.md')
-    lastMsg._stepsBody = row.querySelector('.steps-body')
-    lastMsg._stepsBtn = row.querySelector('.steps-toggle')
-    lastMsg._stepsCount = 0
-  }
+  const newMsg = { role: 'assistant', content: '', streaming: true, stepsCount: 0 }
+  messages.value.push(newMsg)
+  const lastMsg = newMsg
+  const row = buildAssistantRow({ answer: '' })
+  chatEl.value.appendChild(row)
+  lastMsg._row = row
+  lastMsg._bubble = row.querySelector('.bubble')
+  lastMsg._mdEl = row.querySelector('.md')
+  lastMsg._stepsBody = row.querySelector('.steps-body')
+  lastMsg._stepsBtn = row.querySelector('.steps-toggle')
+  lastMsg._stepsCount = 0
   updateStepsToggle(lastMsg)
   addTyping()
 
@@ -689,6 +679,7 @@ function addUser(text) {
   const row = buildUserRow(text)
   chatEl.value.appendChild(row)
   scrollIfNearBottom()
+  messages.value.push({ role: 'user', content: text })
 }
 
 function updateStepsToggle(msg) {
@@ -922,6 +913,7 @@ onMounted(async () => {
       localStorage.removeItem('daa_token'); token.value = ''
     }
   }
+  if (!token.value) showAuth(true)
   health.check().then(() => connected.value = true).catch(() => connected.value = false)
   setInterval(() => { health.check().then(() => connected.value = true).catch(() => connected.value = false) }, 30000)
 
@@ -931,19 +923,12 @@ onMounted(async () => {
       if ((settings.value.theme || 'auto') === 'auto') applyTheme('auto', true)
     })
   }
-
-  // model info
-  fetch('/api/models').then(r => r.json()).then(info => {
-    if (info.model) {
-      const el = document.getElementById('setModel')
-      if (el && !el.value) el.placeholder = '当前: ' + info.model
-    }
-  }).catch(() => {})
 })
 </script>
 
 <template>
-  <div class="layout">
+  <LoginView v-if="authOpen" @login="onLogin" />
+  <div class="layout" v-else>
     <!-- sidebar -->
     <aside :class="['sidebar', { show: sidebarOpen }]">
       <div class="sidebar-head">
@@ -1110,36 +1095,21 @@ onMounted(async () => {
   </div>
 </template>
 
-<script>
-export default {
-  methods: {
-    resetSettings() {
-      this.$data.settings = { model: '', temperature: 0, max_tokens: 0, showSteps: true, enableChart: true, showDuration: true, theme: 'auto', auto: true }
-      localStorage.setItem('daa_settings', JSON.stringify(this.$data.settings))
-      this.applyTheme('auto')
-    },
-    saveSettingsDrawer() {
-      localStorage.setItem('daa_settings', JSON.stringify(this.$data.settings))
-      this.applyTheme(this.$data.settings.theme)
-      this.settingsOpen = false
-      userAPI.prompt.set(this.userPrompt).catch(() => {})
-    }
-  }
-}
-</script>
+
 
 <style scoped>
 /* Layout */
 .layout { display: flex; height: 100vh; overflow: hidden; }
 
 /* Sidebar */
-.sidebar { width: 260px; flex-shrink: 0; background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
+.sidebar { width: 260px; flex-shrink: 0; background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; transition: margin-left 0.25s ease, width 0.25s ease; }
+.sidebar.collapsed { margin-left: -260px; width: 0; border-right: none; }
 .sidebar-head { display: flex; align-items: center; gap: 8px; padding: 16px 16px 8px; }
 .sidebar-title { flex: 1; font-size: 15px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .status-dot.ok { background: var(--ok); }
 .status-dot.err { background: var(--err); }
-.sidebar-close { display: none; background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 16px; }
+.sidebar-close { background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 16px; }
 .sidebar-user { padding: 4px 16px 10px; font-size: 12px; color: var(--text-dim); border-bottom: 1px solid var(--border); }
 .new-conv { margin: 10px 12px; padding: 8px; border: 1px dashed var(--border); border-radius: 8px; background: transparent; color: var(--accent); cursor: pointer; font-size: 13px; width: calc(100% - 24px); }
 .new-conv:hover { background: var(--panel2); }
@@ -1157,7 +1127,7 @@ export default {
 /* Main */
 .main-area { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .topbar { display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel); flex-shrink: 0; }
-.menu-btn { display: none; background: none; border: none; color: var(--text); cursor: pointer; font-size: 20px; padding: 4px; }
+.menu-btn { background: none; border: none; color: var(--text); cursor: pointer; font-size: 20px; padding: 4px; }
 .brand { flex: 1; }
 .title { font-size: 16px; font-weight: 700; }
 .subtitle { font-size: 12px; color: var(--text-dim); margin-top: 1px; }

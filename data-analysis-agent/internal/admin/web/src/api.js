@@ -129,6 +129,22 @@ export const skills = {
   reload: () => request('/reload-skills', 'POST')
 }
 
+export const rag = {
+  status: () => request('/rag'),
+  reload: () => request('/rag/reload', 'POST'),
+  upload: (file) => {
+    const form = new FormData()
+    form.append('file', file)
+    const token = localStorage.getItem('admin_token')
+    const opts = { method: 'POST', body: form, credentials: 'include' }
+    if (token) opts.headers = { 'Authorization': 'Bearer ' + token }
+    return fetch(API + '/rag/upload', opts).then(r => r.json().catch(() => ({}))).then(data => {
+      if (data.error) throw new Error(data.error)
+      return data
+    })
+  }
+}
+
 export function hasPerm(userPerms, code) {
   if (!userPerms || userPerms.length === 0) return false
   if (userPerms.includes('admin:all')) return true

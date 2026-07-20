@@ -29,7 +29,8 @@ const DEFAULT_MENU = [
   { path: '/sample-questions', icon: '❓', name: 'SampleQuestions', label: '示例问题' },
   { path: '/data-permissions', icon: '🔒', name: 'DataPermissions', label: '数据权限' },
   { path: '/field-permissions', icon: '👁️', name: 'FieldPermissions', label: '字段权限' },
-  { path: '/mask-rules', icon: '🎭', name: 'MaskRules', label: '脱敏规则' }
+  { path: '/mask-rules', icon: '🎭', name: 'MaskRules', label: '脱敏规则' },
+  { path: '/rag', icon: '📚', name: 'Rag', label: '知识库管理' }
 ]
 
 const menu = ref([])

@@ -3,6 +3,8 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -47,6 +49,9 @@ type Agent struct {
 	authz *permission.Resolver
 	// masker 脱敏解析器（Agent 侧管理数据脱敏）。
 	masker *permission.MaskResolver
+
+	// ragStore 知识库向量存储（RAG 增强）。
+	ragStore *RAGStore
 }
 
 // CallLogStore 调用日志存储接口，由 userdb.Store 实现。
@@ -79,6 +84,7 @@ func New(cfg *config.Config, callLogStore CallLogStore) (*Agent, error) {
 	if err := a.initMCP(cfg); err != nil {
 		return nil, err
 	}
+	a.initRAG(cfg)
 	return a, nil
 }
 
@@ -165,6 +171,68 @@ func (a *Agent) initMCP(cfg *config.Config) error {
 		a.schema = ""
 	}
 	return nil
+}
+
+// initRAG 初始化知识库：加载文档、分块、计算向量。配置关闭或无需加载时静默跳过。
+func (a *Agent) initRAG(cfg *config.Config) {
+	if !cfg.RAG.Enabled || cfg.RAG.Source == "" {
+		a.ragStore = NewRAGStore()
+		logger.Infof("[rag] RAG 未启用（enabled=%v, source=%q）", cfg.RAG.Enabled, cfg.RAG.Source)
+		return
+	}
+	store := NewRAGStore()
+	chunks, err := LoadDocuments(cfg.RAG.Source, cfg.RAG.ChunkSize)
+	if err != nil {
+		logger.Warnf("[rag] 加载文档失败: %v", err)
+		a.ragStore = store
+		return
+	}
+	if len(chunks) == 0 {
+		logger.Warnf("[rag] 未加载到任何文档（source=%q）", cfg.RAG.Source)
+		a.ragStore = store
+		return
+	}
+	embedModel := cfg.RAG.EmbeddingModel
+	if embedModel == "" {
+		embedModel = cfg.LLM.Model
+	}
+	if err := store.Add(a.llm, embedModel, chunks); err != nil {
+		logger.Warnf("[rag] 计算向量失败: %v", err)
+	}
+	logger.Infof("[rag] 初始化完成: %d 个文档分块, 向量维度=%d", store.Len(), store.dims)
+	a.ragStore = store
+}
+
+// retrieveRAGContext 检索与问题相关的知识库内容，返回格式化文本。
+func (a *Agent) retrieveRAGContext(question string, embedModel string) string {
+	if a.ragStore == nil || a.ragStore.Len() == 0 {
+		return ""
+	}
+	query, err := a.llm.Embed([]string{question}, embedModel)
+	if err != nil || len(query.Embeddings) == 0 {
+		logger.Warnf("[rag] 检索向量失败: %v", err)
+		return ""
+	}
+	topK := a.cfg.RAG.TopK
+	if topK <= 0 {
+		topK = 3
+	}
+	chunks := a.ragStore.Search(query.Embeddings[0], topK)
+	if len(chunks) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n\n以下是知识库中与问题相关的参考内容：\n")
+	for i, c := range chunks {
+		b.WriteString(fmt.Sprintf("\n[%d] ", i+1))
+		if source, ok := c.Metadata["source"]; ok {
+			b.WriteString(fmt.Sprintf("(来源: %s) ", source))
+		}
+		b.WriteString(c.Text)
+		b.WriteString("\n")
+	}
+	b.WriteString("\n请结合以上知识库内容回答用户问题。如果知识库内容与问题无关，请忽略。")
+	return b.String()
 }
 
 // resolveMCPFlags 返回本地/远程 MCP 的实际开关状态。
@@ -264,6 +332,10 @@ func (a *Agent) ApplyConfig(cfg *config.Config) error {
 			logger.Warnf("[agent] 技能热重载失败（目录=%s）: %v", cfg.SkillsDir, err)
 		}
 	}
+
+	// RAG 配置变化时重新初始化知识库。
+	a.cfg.RAG = cfg.RAG
+	a.initRAG(cfg)
 	return nil
 }
 
@@ -293,6 +365,65 @@ func (a *Agent) ReloadSkills() error {
 	logger.Infof("[agent] 技能热重载完成: 目录=%s 共 %d 个: %s", dir, len(skills), strings.Join(names, ", "))
 	a.logActivity("skill_load", fmt.Sprintf("技能热重载完成，共 %d 个: %s", len(skills), strings.Join(names, ", ")), dir, dur, false, "")
 	return nil
+}
+
+// RAGInfo 返回知识库状态信息。
+func (a *Agent) RAGInfo() map[string]interface{} {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	info := map[string]interface{}{
+		"enabled": a.cfg.RAG.Enabled,
+		"source":  a.cfg.RAG.Source,
+		"chunks":  0,
+		"dims":    0,
+		"status":  "未初始化",
+	}
+	if a.ragStore != nil {
+		info["chunks"] = a.ragStore.Len()
+		info["dims"] = a.ragStore.Dims()
+		if a.ragStore.Len() > 0 {
+			info["status"] = "就绪"
+		} else {
+			info["status"] = "空"
+		}
+	}
+	return info
+}
+
+// ReloadRAG 重新加载知识库文档并重建向量索引。
+func (a *Agent) ReloadRAG() error {
+	a.mu.Lock()
+	cfg := *a.cfg
+	a.mu.Unlock()
+	a.initRAG(&cfg)
+	info := a.RAGInfo()
+	logger.Infof("[rag] 知识库重新加载完成: chunks=%d dims=%d", info["chunks"], info["dims"])
+	return nil
+}
+
+// UploadRAGDocument 上传一个文档文件到知识库源目录并重建索引。
+func (a *Agent) UploadRAGDocument(filename string, data []byte) error {
+	a.mu.RLock()
+	source := a.cfg.RAG.Source
+	a.mu.RUnlock()
+	if source == "" {
+		return fmt.Errorf("知识库源路径未配置，请先在系统配置中设置 rag.source")
+	}
+	// 如果 source 是文件，将上传文件放到同目录
+	info, err := os.Stat(source)
+	if err != nil {
+		return fmt.Errorf("知识库源路径无效: %v", err)
+	}
+	dir := source
+	if !info.IsDir() {
+		dir = filepath.Dir(source)
+	}
+	dest := filepath.Join(dir, filename)
+	if err := os.WriteFile(dest, data, 0644); err != nil {
+		return fmt.Errorf("保存文件失败: %v", err)
+	}
+	logger.Infof("[rag] 上传文档: %s -> %s", filename, dest)
+	return a.ReloadRAG()
 }
 
 // transportName 返回传输方式的可读名称（默认 streamable-http）。
@@ -1155,6 +1286,19 @@ func (a *Agent) AskRichWithHistory(history []HistoryItem, question string, opts 
 	showSQL := ShowSQLFromPrompt(a.systemPrompt(userPrompt), userPrompt)
 
 	system := a.systemPrompt(userPrompt)
+
+	// RAG 知识库检索：若启用则将相关文档分块注入系统提示。
+	if a.cfg.RAG.Enabled && a.ragStore != nil && a.ragStore.Len() > 0 {
+		embedModel := a.cfg.RAG.EmbeddingModel
+		if embedModel == "" {
+			embedModel = a.cfg.LLM.Model
+		}
+		ragCtx := a.retrieveRAGContext(question, embedModel)
+		if ragCtx != "" {
+			system += ragCtx
+		}
+	}
+
 	messages := []llm.Message{
 		{Role: "system", Content: system},
 	}

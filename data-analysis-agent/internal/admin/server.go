@@ -60,6 +60,8 @@ var AdminPermissions = []Permission{
 	{Code: "field_perm:write", Name: "字段权限设置", Module: "数据权限管理"},
 	{Code: "mask_rule:read", Name: "脱敏规则查看", Module: "数据权限管理"},
 	{Code: "mask_rule:write", Name: "脱敏规则设置", Module: "数据权限管理"},
+	{Code: "rag:read", Name: "知识库查看", Module: "知识库管理"},
+	{Code: "rag:write", Name: "知识库操作（重新加载/上传文档）", Module: "知识库管理"},
 }
 
 // Permission 描述一项可分配的权限。
@@ -172,6 +174,10 @@ func (s *Server) buildRouter() *gin.Engine {
 		api.GET("/mask-rules", s.requireAuth(), s.requirePerm("mask_rule:read"), s.handleMaskRules)
 		api.POST("/mask-rules", s.requireAuth(), s.requirePerm("mask_rule:write"), s.handleSetMaskRule)
 		api.DELETE("/mask-rules", s.requireAuth(), s.requirePerm("mask_rule:write"), s.handleDeleteMaskRule)
+
+		api.GET("/rag", s.requireAuth(), s.requirePerm("rag:read"), s.handleRAGStatus)
+		api.POST("/rag/reload", s.requireAuth(), s.requirePerm("rag:write"), s.handleRAGReload)
+		api.POST("/rag/upload", s.requireAuth(), s.requirePerm("rag:write"), s.handleRAGUpload)
 	}
 
 	// Vue 后台管理构建产物：统一通过 /admin 和 /admin/* 提供，找不到的文件回退到 index.html。
@@ -1135,6 +1141,65 @@ func (s *Server) handleReloadSkills(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true, "skills": s.skillInfos()})
+}
+
+// ---- RAG 知识库管理 ----
+
+func (s *Server) ragInfo() map[string]interface{} {
+	rag := s.ag.RAGInfo()
+	info := map[string]interface{}{
+		"enabled": rag["enabled"],
+		"chunks":  rag["chunks"],
+		"dims":    rag["dims"],
+		"source":  rag["source"],
+		"status":  rag["status"],
+	}
+	return info
+}
+
+func (s *Server) handleRAGStatus(c *gin.Context) {
+	if !s.usersReady(c) {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"rag": s.ragInfo()})
+}
+
+func (s *Server) handleRAGReload(c *gin.Context) {
+	if !s.usersReady(c) {
+		return
+	}
+	if err := s.ag.ReloadRAG(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "rag": s.ragInfo()})
+}
+
+func (s *Server) handleRAGUpload(c *gin.Context) {
+	if !s.usersReady(c) {
+		return
+	}
+	file, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请选择要上传的文件"})
+		return
+	}
+	src, err := file.Open()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "无法读取文件: " + err.Error()})
+		return
+	}
+	defer src.Close()
+	data, err := io.ReadAll(src)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "读取文件失败: " + err.Error()})
+		return
+	}
+	if err := s.ag.UploadRAGDocument(file.Filename, data); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "rag": s.ragInfo()})
 }
 
 // ---- 管理员 ----

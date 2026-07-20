@@ -24,7 +24,8 @@ const routes = [
       { path: 'sample-questions', name: 'SampleQuestions', component: () => import('./views/SampleQuestions.vue') },
       { path: 'data-permissions', name: 'DataPermissions', component: () => import('./views/DataPermissions.vue') },
       { path: 'field-permissions', name: 'FieldPermissions', component: () => import('./views/FieldPermissions.vue') },
-      { path: 'mask-rules', name: 'MaskRules', component: () => import('./views/MaskRules.vue') }
+      { path: 'mask-rules', name: 'MaskRules', component: () => import('./views/MaskRules.vue') },
+      { path: 'rag', name: 'Rag', component: () => import('./views/Rag.vue') }
     ]
   }
 ]
