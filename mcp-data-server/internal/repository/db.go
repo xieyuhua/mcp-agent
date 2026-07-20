@@ -71,13 +71,8 @@ func configurePool(db *gorm.DB, dialect string) error {
 func AutoMigrate(db *gorm.DB) error {
 	return db.AutoMigrate(
 		&model.Tenant{},
-		&model.User{},
 		&model.Customer{},
 		&model.Order{},
 		&model.AuditLog{},
-		&model.Role{},
-		&model.PermissionPolicy{},
-		&model.MaskRule{},
-		&model.FieldPermission{},
 	)
 }

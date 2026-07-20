@@ -2,87 +2,99 @@
 
 /* --- Dark theme (default) --- */
 :root, [data-theme="dark"] {
-  --bg: #0f1115;
-  --panel: #171a21;
-  --panel2: #1e222b;
-  --border: #2a2f3a;
-  --text: #e6e9ef;
-  --text-dim: #9aa3b2;
-  --accent: #4f8cff;
-  --accent2: #7c5cff;
-  --user-bubble: #2b5cff;
-  --ok: #2ec27e;
-  --warn: #ffb020;
-  --err: #ff6b6b;
-  --primary: #4f8cff;
-  --primary2: #7c5cff;
-  --muted: #9aa3b2;
-  --radius: 8px;
+  --bg: #0b0d14;
+  --panel: #141620;
+  --panel2: #1c1e2e;
+  --panel3: #242740;
+  --border: #262840;
+  --text: #e2e6f0;
+  --text-dim: #7c82a0;
+  --accent: #6c86ff;
+  --accent2: #8b7cf7;
+  --user-bubble: #4f6ef7;
+  --ok: #22c55e;
+  --warn: #f59e0b;
+  --err: #ef4444;
+  --primary: #6c86ff;
+  --primary2: #8b7cf7;
+  --muted: #7c82a0;
+  --radius: 12px;
+  --shadow: 0 2px 8px rgba(0,0,0,0.25);
+  --shadow-lg: 0 8px 24px rgba(0,0,0,0.35);
 }
 
 /* --- Light theme --- */
 [data-theme="light"] {
-  --bg: #f5f6fa;
+  --bg: #f0f2f5;
   --panel: #ffffff;
-  --panel2: #f0f1f5;
-  --border: #e0e2e8;
-  --text: #1a1d26;
-  --text-dim: #6b7280;
-  --accent: #4f8cff;
-  --accent2: #7c5cff;
-  --user-bubble: #4f8cff;
-  --ok: #2ec27e;
-  --warn: #ffb020;
-  --err: #ff6b6b;
-  --primary: #4f8cff;
-  --primary2: #7c5cff;
-  --muted: #6b7280;
-  --radius: 8px;
+  --panel2: #f5f6fa;
+  --panel3: #eef0f5;
+  --border: #e2e5ed;
+  --text: #1a1d29;
+  --text-dim: #8c91a3;
+  --accent: #4f6ef7;
+  --accent2: #6c5ce7;
+  --user-bubble: #4f6ef7;
+  --ok: #22c55e;
+  --warn: #f59e0b;
+  --err: #ef4444;
+  --primary: #4f6ef7;
+  --primary2: #6c5ce7;
+  --muted: #8c91a3;
+  --radius: 12px;
+  --shadow: 0 2px 8px rgba(0,0,0,0.06);
+  --shadow-lg: 0 8px 24px rgba(0,0,0,0.1);
 }
 
 /* --- Auto theme (follows system) --- */
 [data-theme="auto"] {
-  --bg: #0f1115;
-  --panel: #171a21;
-  --panel2: #1e222b;
-  --border: #2a2f3a;
-  --text: #e6e9ef;
-  --text-dim: #9aa3b2;
-  --accent: #4f8cff;
-  --accent2: #7c5cff;
-  --user-bubble: #2b5cff;
-  --ok: #2ec27e;
-  --warn: #ffb020;
-  --err: #ff6b6b;
-  --primary: #4f8cff;
-  --primary2: #7c5cff;
-  --muted: #9aa3b2;
-  --radius: 8px;
+  --bg: #0b0d14;
+  --panel: #141620;
+  --panel2: #1c1e2e;
+  --panel3: #242740;
+  --border: #262840;
+  --text: #e2e6f0;
+  --text-dim: #7c82a0;
+  --accent: #6c86ff;
+  --accent2: #8b7cf7;
+  --user-bubble: #4f6ef7;
+  --ok: #22c55e;
+  --warn: #f59e0b;
+  --err: #ef4444;
+  --primary: #6c86ff;
+  --primary2: #8b7cf7;
+  --muted: #7c82a0;
+  --radius: 12px;
+  --shadow: 0 2px 8px rgba(0,0,0,0.25);
+  --shadow-lg: 0 8px 24px rgba(0,0,0,0.35);
 }
 @media (prefers-color-scheme: light) {
   [data-theme="auto"] {
-    --bg: #f5f6fa;
+    --bg: #f0f2f5;
     --panel: #ffffff;
-    --panel2: #f0f1f5;
-    --border: #e0e2e8;
-    --text: #1a1d26;
-    --text-dim: #6b7280;
-    --accent: #4f8cff;
-    --accent2: #7c5cff;
-    --user-bubble: #4f8cff;
-    --ok: #2ec27e;
-    --warn: #ffb020;
-    --err: #ff6b6b;
-    --primary: #4f8cff;
-    --primary2: #7c5cff;
-    --muted: #6b7280;
-    --radius: 8px;
+    --panel2: #f5f6fa;
+    --panel3: #eef0f5;
+    --border: #e2e5ed;
+    --text: #1a1d29;
+    --text-dim: #8c91a3;
+    --accent: #4f6ef7;
+    --accent2: #6c5ce7;
+    --user-bubble: #4f6ef7;
+    --ok: #22c55e;
+    --warn: #f59e0b;
+    --err: #ef4444;
+    --primary: #4f6ef7;
+    --primary2: #6c5ce7;
+    --muted: #8c91a3;
+    --radius: 12px;
+    --shadow: 0 2px 8px rgba(0,0,0,0.06);
+    --shadow-lg: 0 8px 24px rgba(0,0,0,0.1);
   }
 }
 
 html, body, #app { height: 100%; }
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; background: var(--bg); color: var(--text); }
-::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-thumb { background: #333a47; border-radius: 4px; }
-[data-theme="light"] ::-webkit-scrollbar-thumb, [data-theme="auto"] ::-webkit-scrollbar-thumb { background: #d0d2d8; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; background: var(--bg); color: var(--text); -webkit-font-smoothing: antialiased; }
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
 a { color: var(--accent); cursor: pointer; }

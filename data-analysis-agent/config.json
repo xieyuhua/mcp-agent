@@ -13,6 +13,7 @@
     "db_dsn": "./data.db",
     "username": "admin",
     "password": "admin123",
+    "auth_disabled": true,
     "mask_enabled": true,
     "seed_demo": true,
     "work_dir": "workdir",

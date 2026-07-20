@@ -1,5 +1,5 @@
 <script setup>
-import { ref, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted } from 'vue'
 import { auth, health, conversations, user as userAPI, uiConfig, askStream } from './api'
 import { watch } from 'vue'
 
@@ -21,6 +21,9 @@ const msgOffset = ref(0)
 const chatEl = ref(null)
 const samplesEl = ref(null)
 const inputEl = ref(null)
+const suggestions = ref([])
+const suggestIdx = ref(-1)
+const allQuestions = ref([])
 
 // auth overlay
 const authOpen = ref(false)
@@ -39,12 +42,89 @@ const settings = ref({
   enableChart: saved.enableChart !== false,
   showDuration: saved.showDuration !== false,
   theme: saved.theme || 'auto',
-  auto: saved.auto !== false
+  auto: saved.auto !== false,
+  mode: saved.mode || 'react'
 })
 const userPrompt = ref('')
 const globalUI = ref({ app_title: '数据分析助手', app_subtitle: '', workflow_steps: '自然语言 → LLM → MCP 权限 → SQL → 图表分析', theme: 'auto' })
 const sampleQuestions = ref([])
+const sampleCategory = ref('')
 const pendingStep = ref(null)
+
+const sampleCategories = computed(() => {
+  const cats = new Set()
+  for (const q of sampleQuestions.value) {
+    if (q.enabled !== false && q.category) cats.add(q.category)
+  }
+  return [...cats].sort()
+})
+
+const visibleSamples = computed(() => {
+  return sampleQuestions.value.filter(q => {
+    if (q.enabled === false) return false
+    if (sampleCategory.value && q.category !== sampleCategory.value) return false
+    return true
+  })
+})
+
+function buildQuestionIndex() {
+  const qs = new Set()
+  for (const s of sampleQuestions.value) {
+    if (s.enabled !== false && s.text) qs.add(s.text)
+  }
+  for (const m of messages.value) {
+    if (m.role === 'user' && m.content) qs.add(m.content)
+  }
+  allQuestions.value = [...qs]
+}
+
+function getSuggestions(input) {
+  if (!input || input.length < 1) { suggestions.value = []; suggestIdx.value = -1; return }
+  const lower = input.toLowerCase()
+  const matched = allQuestions.value.filter(q => q.toLowerCase().includes(lower)).slice(0, 6)
+  suggestions.value = matched
+  suggestIdx.value = -1
+}
+
+function selectSuggestion(text) {
+  question.value = text
+  suggestions.value = []
+  suggestIdx.value = -1
+}
+
+function onBlur() {
+  setTimeout(clearSuggestions, 200)
+}
+
+function clearSuggestions() {
+  suggestions.value = []
+  suggestIdx.value = -1
+}
+
+function autoResize() {
+  nextTick(() => {
+    const el = inputEl.value
+    if (el) {
+      el.style.height = 'auto'
+      el.style.height = Math.min(el.scrollHeight, 200) + 'px'
+    }
+  })
+}
+
+function onInputKeydown(e) {
+  if (e.key === 'Escape') { clearSuggestions(); return }
+  if (suggestions.value.length === 0) return
+  if (e.key === 'ArrowDown') {
+    e.preventDefault()
+    suggestIdx.value = Math.min(suggestIdx.value + 1, suggestions.value.length - 1)
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault()
+    suggestIdx.value = Math.max(suggestIdx.value - 1, -1)
+  } else if (e.key === 'Enter' && suggestIdx.value >= 0) {
+    e.preventDefault()
+    selectSuggestion(suggestions.value[suggestIdx.value])
+  }
+}
 
 function saveSettings() { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings.value)) }
 
@@ -67,8 +147,12 @@ async function loadGlobalUI() {
     if (cfg.show_steps === false) settings.value.showSteps = false
     if (cfg.show_images === false) settings.value.enableChart = false
     if (cfg.sample_questions) {
-      try { sampleQuestions.value = JSON.parse(cfg.sample_questions) } catch (e) { sampleQuestions.value = [] }
+      try {
+        const raw = JSON.parse(cfg.sample_questions)
+        sampleQuestions.value = Array.isArray(raw) ? raw.map(v => typeof v === 'string' ? { text: v, enabled: true, category: '' } : { text: v.text || '', enabled: v.enabled !== false, category: v.category || '' }) : []
+      } catch (e) { sampleQuestions.value = [] }
     }
+    buildQuestionIndex()
     saveSettings()
   } catch (e) {}
 }
@@ -99,7 +183,7 @@ async function doAuth() {
 
 async function afterLogin() {
   loadConvs()
-  loadGlobalUI()
+  await loadGlobalUI()
   try { const r = await userAPI.prompt.get(); userPrompt.value = r.prompt || '' } catch (e) {}
   const saved = localStorage.getItem('daa_current_conv')
   if (saved) {
@@ -193,10 +277,12 @@ function prependLoadMore() {
 function resetChat() {
   if (loadMoreEl.value) { loadMoreEl.value.remove(); loadMoreEl.value = null }
   chatEl.value.innerHTML = ''
+  messages.value = []
   msgOffset.value = 0; hasMoreMsgs.value = false
   // welcome message with samples
   const row = document.createElement('div'); row.className = 'row assistant'
-  row.innerHTML = '<div class="avatar">AI</div><div class="bubble"><div class="md"><p style="margin-bottom:6px"><strong>👋 你好，我是' + escapeHtml(globalUI.value.app_title || '数据分析助手') + '</strong></p><p>' + escapeHtml(workflowSummary()) + '下面是一些可以试试的问题：</p></div></div>'
+  const samplesHint = sampleQuestions.value.length ? '下面是一些可以试试的问题：' : ''
+  row.innerHTML = '<div class="avatar">AI</div><div class="bubble"><div class="md"><p style="margin-bottom:6px"><strong>👋 你好，我是' + escapeHtml(globalUI.value.app_title || '数据分析助手') + '</strong></p><p>' + escapeHtml(workflowSummary()) + samplesHint + '</p></div></div>'
   chatEl.value.appendChild(row)
   if (samplesEl.value) samplesEl.value.style.display = ''
 }
@@ -371,8 +457,20 @@ function addCopyButtons(root) {
 // ---- streaming send ----
 async function send() {
   const q = question.value.trim()
-  if (!q || sending.value) return
+  if (!q) return
   if (!token.value) return
+  
+  // auto-interrupt: if currently sending, stop and mark previous as interrupted
+  if (sending.value) {
+    stopSend()
+    const lastBubble = chatEl.value?.querySelector('.row.assistant:last-child .bubble')
+    if (lastBubble && !lastBubble.querySelector('.interrupt-notice')) {
+      const notice = document.createElement('div'); notice.className = 'interrupt-notice'; notice.textContent = '⏹ 已中断'
+      lastBubble.appendChild(notice)
+    }
+    await new Promise(r => setTimeout(r, 50))
+  }
+  
   question.value = ''
 
   // if no conv, create one
@@ -385,7 +483,7 @@ async function send() {
     } catch (e) { errMsg.value = e.message; return }
   }
 
-  samplesEl.value.style.display = 'none'
+  if (samplesEl.value) samplesEl.value.style.display = 'none'
   addUser(q)
   sending.value = true
   pendingStep.value = null
@@ -395,8 +493,28 @@ async function send() {
   if (settings.value.temperature > 0) body.temperature = settings.value.temperature
   if (settings.value.max_tokens > 0) body.max_tokens = settings.value.max_tokens
   if (settings.value.enableChart === false) body.enable_chart = false
+  if (settings.value.mode) body.mode = settings.value.mode
   if (userPrompt.value) body.user_prompt = userPrompt.value
 
+  // Create assistant row upfront so steps + answer appear in a single bubble
+  const msg = messages.value[messages.value.length - 1]
+  if (!msg || msg.role === 'user') {
+    const newMsg = { role: 'assistant', content: '', streaming: true, stepsCount: 0 }
+    messages.value.push(newMsg)
+  }
+  const lastMsg = messages.value[messages.value.length - 1]
+  if (!lastMsg._rowCreated) {
+    lastMsg._rowCreated = true
+    const row = buildAssistantRow({ answer: '' })
+    chatEl.value.appendChild(row)
+    lastMsg._row = row
+    lastMsg._bubble = row.querySelector('.bubble')
+    lastMsg._mdEl = row.querySelector('.md')
+    lastMsg._stepsBody = row.querySelector('.steps-body')
+    lastMsg._stepsBtn = row.querySelector('.steps-toggle')
+    lastMsg._stepsCount = 0
+  }
+  updateStepsToggle(lastMsg)
   addTyping()
 
   try {
@@ -412,6 +530,10 @@ async function send() {
     stopFn.value = null
     removeTyping()
     if (pendingStep.value) { pendingStep.value.remove(); pendingStep.value = null }
+    if (lastMsg) {
+      lastMsg.streaming = false
+      updateStepsToggle(lastMsg)
+    }
   }
 }
 
@@ -430,13 +552,29 @@ function handleStreamEvent(ev) {
     return
   }
   if (ev.kind === 'thinking') { addTyping(); return }
+
+  const lastMsg = messages.value[messages.value.length - 1]
+  const getBubble = () => lastMsg?._bubble || document.querySelector('.row.assistant:last-child .bubble')
+
+  if (ev.kind === 'plan') {
+    removeTyping()
+    const planSteps = ev.plan || []
+    if (planSteps.length) {
+      const row = document.createElement('div'); row.className = 'row assistant'
+      row.innerHTML = '<div class="avatar">AI</div><div class="bubble"><div class="plan-block"><div class="plan-title">📋 分析计划</div><div class="plan-steps">' + planSteps.map((s, i) => '<div class="plan-step"><span class="plan-num">' + (i+1) + '</span><span class="plan-text">' + escapeHtml(s) + '</span></div>').join('') + '</div></div></div>'
+      chatEl.value.appendChild(row)
+      scrollIfNearBottom()
+    }
+    return
+  }
   if (ev.kind === 'step_start') {
     removeTyping()
-    const lastMsg = messages.value[messages.value.length - 1]
     if (!lastMsg || lastMsg.role !== 'assistant') return
     lastMsg.streaming = true
-    lastMsg.stepsCount = (lastMsg.stepsCount || 0) + 1
-    buildStepPending(ev.step)
+    lastMsg._stepsCount = (lastMsg._stepsCount || 0) + 1
+    lastMsg.stepsCount = lastMsg._stepsCount
+    buildStepPending(ev.step, lastMsg)
+    updateStepsToggle(lastMsg)
     return
   }
   if (ev.kind === 'step_progress') {
@@ -458,24 +596,21 @@ function handleStreamEvent(ev) {
   }
   if (ev.kind === 'step') {
     removeTyping()
-    finalizeStep(ev.step)
+    finalizeStep(ev.step, lastMsg)
     return
   }
   if (ev.kind === 'answer_delta') {
     removeTyping()
-    const lastMsg = messages.value[messages.value.length - 1]
     if (!lastMsg || lastMsg.role !== 'assistant') return
-    if (!lastMsg._rendered) {
-      lastMsg._rendered = true
-      lastMsg._content = ''
-      const row = buildAssistantRow({ answer: '' })
-      const chatContainer = chatEl.value
-      chatContainer.appendChild(row)
-      lastMsg._row = row
-      lastMsg._mdEl = row.querySelector('.md')
-      lastMsg._bubble = row.querySelector('.bubble')
+    if (!lastMsg._mdEl) {
+      const bubble = getBubble()
+      if (bubble) {
+        const mdEl = document.createElement('div'); mdEl.className = 'md'
+        bubble.appendChild(mdEl)
+        lastMsg._mdEl = mdEl
+      }
     }
-    lastMsg._content += (ev.text || '')
+    lastMsg._content = (lastMsg._content || '') + (ev.text || '')
     if (lastMsg._mdEl) {
       lastMsg._mdEl.innerHTML = renderMarkdown(lastMsg._content)
       addCopyButtons(lastMsg._mdEl)
@@ -485,25 +620,31 @@ function handleStreamEvent(ev) {
   }
   if (ev.kind === 'answer') {
     removeTyping()
-    const lastMsg = messages.value[messages.value.length - 1]
     if (!lastMsg || lastMsg.role !== 'assistant') return
-    if (lastMsg._rendered && lastMsg._mdEl) {
-      lastMsg._content = ev.text || ''
+    const finalText = ev.text || lastMsg._content || ''
+    if (lastMsg._mdEl) {
+      lastMsg._content = finalText
       lastMsg._mdEl.innerHTML = renderMarkdown(lastMsg._content)
       addCopyButtons(lastMsg._mdEl)
     } else {
-      lastMsg._content = ev.text || ''
-      messages.value.push({ ...lastMsg })
+      const bubble = getBubble()
+      if (bubble) {
+        const mdEl = document.createElement('div'); mdEl.className = 'md'
+        mdEl.innerHTML = renderMarkdown(finalText)
+        addCopyButtons(mdEl)
+        bubble.appendChild(mdEl)
+        lastMsg._mdEl = mdEl
+        lastMsg._content = finalText
+      }
     }
     scrollIfNearBottom()
     return
   }
   if (ev.kind === 'result') {
     removeTyping()
-    const lastMsg = messages.value[messages.value.length - 1]
     if (!lastMsg || lastMsg.role !== 'assistant') return
     lastMsg.streaming = false
-    const bubble = lastMsg._bubble || document.querySelector('.row.assistant:last-child .bubble')
+    const bubble = getBubble()
     if (bubble) renderExtras(bubble, ev)
     scrollIfNearBottom()
     return
@@ -511,8 +652,10 @@ function handleStreamEvent(ev) {
   if (ev.kind === 'done' || ev.kind === 'close') {
     removeTyping()
     if (pendingStep.value) { pendingStep.value.remove(); pendingStep.value = null }
-    const lastMsg = messages.value[messages.value.length - 1]
-    if (lastMsg) lastMsg.streaming = false
+    if (lastMsg) {
+      lastMsg.streaming = false
+      updateStepsToggle(lastMsg)
+    }
     return
   }
   if (ev.kind === 'error') {
@@ -548,6 +691,15 @@ function addUser(text) {
   scrollIfNearBottom()
 }
 
+function updateStepsToggle(msg) {
+  if (!msg._stepsBtn) return
+  const count = msg._stepsCount || 0
+  const vis = msg._stepsBody && msg._stepsBody.style.display !== 'none'
+  const label = count > 0 ? (vis ? '收起' : '查看') + '分析过程（' + count + ' 步）' : ''
+  msg._stepsBtn.textContent = label
+  msg._stepsBtn.style.display = count > 0 ? '' : 'none'
+}
+
 function addTyping() {
   if (document.getElementById('typing')) return
   const row = document.createElement('div'); row.className = 'row assistant'; row.id = 'typing'
@@ -568,8 +720,8 @@ function addError(msg) {
   scrollIfNearBottom()
 }
 
-function buildStepPending(step) {
-  const stepsBody = document.querySelector('.steps-body')
+function buildStepPending(step, msg) {
+  const stepsBody = msg?._stepsBody || document.querySelector('.steps-body')
   if (!stepsBody) return
   const ps = document.createElement('div'); ps.className = 'step pending'
   const pt = document.createElement('div'); pt.className = 'step-tool'
@@ -586,8 +738,8 @@ function buildStepPending(step) {
   scrollIfNearBottom()
 }
 
-function finalizeStep(step) {
-  const stepsBody = document.querySelector('.steps-body')
+function finalizeStep(step, msg) {
+  const stepsBody = msg?._stepsBody || document.querySelector('.steps-body')
   if (!stepsBody) return
   let st
   if (pendingStep.value) {
@@ -640,17 +792,24 @@ function buildAssistantRow(res) {
   // steps container (inserted before md)
   const stepsWrap = document.createElement('div'); stepsWrap.className = 'steps block'
   const stepsBtn = document.createElement('button'); stepsBtn.className = 'steps-toggle'
-  stepsBtn.textContent = '查看分析过程'
+  stepsBtn.textContent = ''
+  stepsBtn.style.display = 'none'
   const stepsBody = document.createElement('div'); stepsBody.className = 'steps-body'
-  stepsBody.style.display = settings.value.showSteps ? 'flex' : 'none'
-  let stepsCount = 0
+  stepsBody.style.display = 'none'
   stepsBtn.onclick = () => {
     const vis = stepsBody.style.display !== 'none'
     stepsBody.style.display = vis ? 'none' : 'flex'
-    stepsBtn.textContent = (vis ? '查看' : '收起') + '分析过程（' + stepsCount + ' 步）'
+    stepsBtn.textContent = (vis ? '查看' : '收起') + '分析过程'
   }
   stepsWrap.appendChild(stepsBtn); stepsWrap.appendChild(stepsBody)
   bubble.appendChild(stepsWrap)
+
+  // Set references for the last message
+  const lastMsg = messages.value[messages.value.length - 1]
+  if (lastMsg) {
+    lastMsg._stepsBody = stepsBody
+    lastMsg._stepsBtn = stepsBtn
+  }
 
   const mdEl = document.createElement('div'); mdEl.className = 'md'
   mdEl.innerHTML = renderMarkdown(res.answer || '')
@@ -826,35 +985,45 @@ onMounted(async () => {
           <button class="load-more-btn" @click="loadMore">加载更多历史消息</button>
         </div>
 
-        <!-- rendered messages from store -->
-        <div v-for="(m, i) in messages" :key="i" class="row" :class="m.role">
-          <div class="avatar">{{ m.role === 'user' ? '我' : 'AI' }}</div>
-          <div class="bubble">
-            <div class="md" v-html="renderMarkdown(m.content)"></div>
-          </div>
-        </div>
-
-        <!-- streaming messages rendered via direct DOM (managed by stream handlers) -->
+        <!-- messages rendered via direct DOM (see send/handleStreamEvent/loadMessages) -->
         <div id="msg-anchor"></div>
       </div>
 
       <div class="samples" id="samples" ref="samplesEl" v-if="!activeConvId && sampleQuestions.length">
+        <div class="sample-cats" v-if="sampleCategories.length">
+          <button :class="['cat-btn', { active: !sampleCategory }]" @click="sampleCategory = ''">全部</button>
+          <button v-for="c in sampleCategories" :key="c" :class="['cat-btn', { active: sampleCategory === c }]" @click="sampleCategory = c">{{ c }}</button>
+        </div>
         <button
-          v-for="s in sampleQuestions"
-          :key="s"
-          @click="question = s; send()"
-        >{{ s }}</button>
+          v-for="(s, i) in visibleSamples"
+          :key="i"
+          @click="question = s.text; send()"
+        >{{ s.text }}</button>
       </div>
 
       <footer class="composer">
-        <textarea
-          id="input"
-          v-model="question"
-          rows="1"
-          placeholder="输入你的数据分析问题…"
-          :disabled="sending"
-          @keydown.enter.exact="!sending && send()"
-        ></textarea>
+        <div class="input-wrap">
+          <div class="suggestions" v-if="suggestions.length && !sending">
+            <div
+              v-for="(s, i) in suggestions"
+              :key="i"
+              :class="['sug-item', { active: suggestIdx === i }]"
+              @mousedown.prevent="selectSuggestion(s)"
+            >{{ s }}</div>
+          </div>
+          <textarea
+            id="input"
+            v-model="question"
+            rows="1"
+            placeholder="输入你的数据分析问题…"
+            :disabled="sending"
+            @input="getSuggestions(question); autoResize()"
+            @keydown="onInputKeydown"
+            @keydown.enter.exact="!sending && send()"
+            @blur="onBlur"
+            @focus="getSuggestions(question)"
+          ></textarea>
+        </div>
         <button
           id="sendBtn"
           :class="['send', { stop: sending }]"
@@ -919,6 +1088,13 @@ onMounted(async () => {
         <textarea id="setPrompt" v-model="userPrompt" rows="5" placeholder='留空则使用系统后台默认提示词。可在此追加个性化要求，例如："请展示原始SQL"或"不要展示SQL，只给业务结论。"'></textarea>
         <div class="hint">追加在系统提示词之后，当前用户生效。支持通过提示词控制是否展示 SQL。</div>
       </div>
+      <div class="field">
+        <label>运行模式</label>
+        <select v-model="settings.mode">
+          <option value="react">React（实时推理+工具调用）</option>
+          <option value="plan">Plan（先计划后执行）</option>
+        </select>
+      </div>
       <div class="switch-row">
         <span class="desc">自动滚动到最新</span>
         <label class="switch">
@@ -966,17 +1142,17 @@ export default {
 .sidebar-close { display: none; background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 16px; }
 .sidebar-user { padding: 4px 16px 10px; font-size: 12px; color: var(--text-dim); border-bottom: 1px solid var(--border); }
 .new-conv { margin: 10px 12px; padding: 8px; border: 1px dashed var(--border); border-radius: 8px; background: transparent; color: var(--accent); cursor: pointer; font-size: 13px; width: calc(100% - 24px); }
-.new-conv:hover { background: var(--panel-2); }
+.new-conv:hover { background: var(--panel2); }
 .conv-list { flex: 1; overflow-y: auto; padding: 4px 8px; }
 .conv-item { display: flex; align-items: center; padding: 8px 10px; border-radius: 8px; cursor: pointer; font-size: 13px; margin-bottom: 2px; }
-.conv-item:hover { background: var(--panel-2); }
-.conv-item.active { background: var(--panel-2); border-left: 3px solid var(--accent); }
+.conv-item:hover { background: var(--panel2); }
+.conv-item.active { background: var(--panel2); border-left: 3px solid var(--accent); }
 .conv-item .ct { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .conv-item .del { opacity: 0; background: none; border: none; color: var(--err); cursor: pointer; font-size: 12px; padding: 2px 6px; border-radius: 4px; }
 .conv-item:hover .del { opacity: 1; }
 .sidebar-foot { display: flex; gap: 4px; padding: 10px 12px; border-top: 1px solid var(--border); }
 .sidebar-foot .btn-ghost { flex: 1; padding: 6px; background: transparent; border: 1px solid var(--border); border-radius: 6px; color: var(--text-dim); font-size: 12px; cursor: pointer; }
-.sidebar-foot .btn-ghost:hover { color: var(--text); background: var(--panel-2); }
+.sidebar-foot .btn-ghost:hover { color: var(--text); background: var(--panel2); }
 
 /* Main */
 .main-area { flex: 1; display: flex; flex-direction: column; min-width: 0; }
@@ -989,11 +1165,22 @@ export default {
 .status.off { color: var(--warn); }
 .status .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
 
+/* Plan block */
+.plan-block { margin-bottom: 8px; }
+.plan-title { font-size: 14px; font-weight: 700; margin-bottom: 8px; }
+.plan-steps { display: flex; flex-direction: column; gap: 6px; }
+.plan-step { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; line-height: 1.5; }
+.plan-num { flex: 0 0 22px; height: 22px; border-radius: 50%; background: var(--accent); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; }
+.plan-text { flex: 1; color: var(--text); }
+
+/* Interrupt notice */
+.interrupt-notice { font-size: 11px; color: var(--warn); margin-top: 6px; font-style: italic; }
+
 /* Chat */
 .chat { flex: 1; overflow-y: auto; padding: 20px 18px; display: flex; flex-direction: column; gap: 18px; }
 .chat :deep(.row) { display: flex; gap: 10px; align-items: flex-start; }
 .chat :deep(.row.user) { flex-direction: row-reverse; }
-.chat :deep(.avatar) { flex: 0 0 34px; width: 34px; height: 34px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; background: var(--panel-2); color: var(--text-dim); }
+.chat :deep(.avatar) { flex: 0 0 34px; width: 34px; height: 34px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; background: var(--panel2); color: var(--text-dim); }
 .chat :deep(.row.user .avatar) { background: var(--user-bubble); color: #fff; }
 .chat :deep(.bubble) { max-width: 80%; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; line-height: 1.6; }
 .chat :deep(.row.user .bubble) { background: var(--user-bubble); border-color: transparent; color: #fff; }
@@ -1006,7 +1193,7 @@ export default {
 .chat :deep(.md code) { background: var(--bg); padding: 1px 4px; border-radius: 4px; font-size: 13px; }
 .chat :deep(.md pre) { background: #0c0e13; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; overflow-x: auto; font-size: 12.5px; margin: 8px 0; position: relative; }
 .chat :deep(.md pre code) { background: transparent; padding: 0; }
-.chat :deep(.copy-btn) { position: absolute; top: 4px; right: 4px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px; color: var(--text-dim); font-size: 11px; padding: 2px 6px; cursor: pointer; }
+.chat :deep(.copy-btn) { position: absolute; top: 4px; right: 4px; background: var(--panel2); border: 1px solid var(--border); border-radius: 4px; color: var(--text-dim); font-size: 11px; padding: 2px 6px; cursor: pointer; }
 .chat :deep(.copy-btn:hover) { color: var(--text); }
 .chat :deep(.copy-btn.ok) { color: var(--ok); }
 
@@ -1036,7 +1223,7 @@ export default {
 
 /* SQL */
 .chat :deep(.sql) { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin: 8px 0; }
-.chat :deep(.sql-header) { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; background: var(--panel-2); cursor: pointer; }
+.chat :deep(.sql-header) { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; background: var(--panel2); cursor: pointer; }
 .chat :deep(.sql-label) { font-size: 12px; color: var(--text-dim); }
 .chat :deep(.sql-toggle) { background: none; border: none; color: var(--text-dim); font-size: 12px; cursor: pointer; }
 .chat :deep(.sql-body) { display: none; }
@@ -1047,7 +1234,7 @@ export default {
 .chat :deep(.table-wrap) { overflow-x: auto; margin: 8px 0; border: 1px solid var(--border); border-radius: 8px; }
 .chat :deep(table) { width: 100%; border-collapse: collapse; font-size: 12px; }
 .chat :deep(th), :deep(td) { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
-.chat :deep(th) { background: var(--panel-2); color: var(--text-dim); font-weight: 600; }
+.chat :deep(th) { background: var(--panel2); color: var(--text-dim); font-weight: 600; }
 .chat :deep(td) { color: var(--text); }
 .chat :deep(.more) { padding: 6px 10px; font-size: 12px; color: var(--text-dim); }
 
@@ -1061,16 +1248,27 @@ export default {
 
 /* Samples */
 .samples { display: flex; flex-wrap: wrap; gap: 8px; padding: 8px 18px 12px; flex-shrink: 0; }
-.samples button { background: var(--panel-2); border: 1px solid var(--border); color: var(--text-dim); border-radius: 16px; padding: 6px 14px; font-size: 13px; cursor: pointer; }
+.samples button { background: var(--panel2); border: 1px solid var(--border); color: var(--text-dim); border-radius: 16px; padding: 6px 14px; font-size: 13px; cursor: pointer; }
 .samples button:hover { color: var(--text); border-color: var(--accent); }
+.sample-cats { display: flex; gap: 4px; width: 100%; margin-bottom: 4px; flex-wrap: wrap; }
+.sample-cats .cat-btn { font-size: 12px; padding: 3px 10px; border-radius: 10px; background: transparent; border: 1px solid var(--border); color: var(--text-dim); cursor: pointer; }
+.sample-cats .cat-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
 
 /* Composer */
-.composer { display: flex; gap: 10px; padding: 14px 18px; border-top: 1px solid var(--border); background: var(--panel); flex-shrink: 0; }
-.composer textarea { flex: 1; resize: none; background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; color: var(--text); padding: 10px 12px; font-size: 14px; font-family: inherit; line-height: 1.5; max-height: 140px; }
-.composer textarea:focus { outline: none; border-color: var(--accent); }
-.send { flex-shrink: 0; background: linear-gradient(135deg, var(--accent), var(--accent-2)); border: none; color: #fff; border-radius: 10px; padding: 0 22px; font-size: 14px; font-weight: 600; cursor: pointer; }
+.composer { display: flex; gap: 10px; padding: 14px 18px; border-top: 1px solid var(--border); background: var(--panel); flex-shrink: 0; position: relative; }
+.input-wrap { flex: 1; position: relative; }
+.composer textarea { width: 100%; resize: none; background: var(--panel2); border: 1px solid var(--border); border-radius: 10px; color: var(--text); padding: 10px 12px; font-size: 14px; font-family: inherit; line-height: 1.5; max-height: 200px; min-height: 44px; box-sizing: border-box; transition: border-color 0.2s, box-shadow 0.2s; }
+.composer textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(79,108,255,0.1); }
+.suggestions { position: absolute; bottom: 100%; left: 0; right: 0; margin-bottom: 4px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow-lg); max-height: 200px; overflow-y: auto; z-index: 50; }
+.sug-item { padding: 8px 12px; font-size: 13px; color: var(--text); cursor: pointer; transition: background 0.15s; }
+.sug-item:hover, .sug-item.active { background: var(--panel2); color: var(--accent); }
+.sug-item:first-child { border-radius: 10px 10px 0 0; }
+.sug-item:last-child { border-radius: 0 0 10px 10px; }
+.send { flex-shrink: 0; background: linear-gradient(135deg, var(--accent), var(--accent2)); border: none; color: #fff; border-radius: 10px; padding: 0 24px; font-size: 14px; font-weight: 600; cursor: pointer; transition: opacity 0.2s, transform 0.1s; }
+.send:hover { opacity: 0.9; transform: scale(1.02); }
+.send:active { transform: scale(0.98); }
 .send.stop { background: var(--err); }
-.send:disabled { opacity: 0.5; cursor: not-allowed; }
+.send:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
 
 /* Drawer */
 .overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 200; }
@@ -1080,7 +1278,7 @@ export default {
 .drawer-head { font-size: 16px; font-weight: 700; margin-bottom: 20px; }
 .field { margin-bottom: 16px; }
 .field label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }
-.field input, .field select, .field textarea { width: 100%; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 8px 10px; font-size: 13px; }
+.field input, .field select, .field textarea { width: 100%; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 8px 10px; font-size: 13px; }
 .field select { cursor: pointer; }
 .field textarea { resize: vertical; min-height: 60px; font-family: inherit; }
 .field .hint { font-size: 11px; color: var(--text-dim); margin-top: 4px; line-height: 1.4; }
@@ -1097,8 +1295,8 @@ export default {
 .switch input:checked + .slider::before { transform: translateX(18px); }
 .foot { display: flex; gap: 10px; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
 .btn-ghost { flex: 1; padding: 8px; background: transparent; border: 1px solid var(--border); border-radius: 8px; color: var(--text-dim); font-size: 13px; cursor: pointer; }
-.btn-ghost:hover { color: var(--text); background: var(--panel-2); }
-.btn-primary { flex: 1; padding: 8px; background: linear-gradient(135deg, var(--accent), var(--accent-2)); border: none; border-radius: 8px; color: #fff; font-size: 13px; font-weight: 600; cursor: pointer; }
+.btn-ghost:hover { color: var(--text); background: var(--panel2); }
+.btn-primary { flex: 1; padding: 8px; background: linear-gradient(135deg, var(--accent), var(--accent2)); border: none; border-radius: 8px; color: #fff; font-size: 13px; font-weight: 600; cursor: pointer; }
 
 /* Responsive */
 @media (max-width: 600px) {

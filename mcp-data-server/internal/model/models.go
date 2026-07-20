@@ -9,19 +9,7 @@ type Tenant struct {
 	CreatedAt time.Time
 }
 
-// User 系统用户，携带角色与数据范围（区域/门店）。
-type User struct {
-	ID        string    `gorm:"primaryKey;size:36"`
-	TenantID  string    `gorm:"index:idx_user_tenant"`
-	Username  string    `gorm:"size:64;uniqueIndex:idx_user_name"`
-	Password  string    `gorm:"size:128"` // sha256 hex
-	Role      string    `gorm:"size:32"`  // super_admin|region_manager|store_manager|staff|analyst
-	RegionID  string    `gorm:"index:idx_user_region"`
-	StoreID   string    `gorm:"index:idx_user_store"`
-	CreatedAt time.Time
-}
-
-// Customer 业务表：客户（含敏感字段，用于演示脱敏）。
+// Customer 业务表：客户。
 type Customer struct {
 	ID        uint      `gorm:"primaryKey"`
 	TenantID  string    `gorm:"index:idx_cust_tenant"`

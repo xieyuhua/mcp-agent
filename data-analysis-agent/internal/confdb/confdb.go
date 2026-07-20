@@ -308,9 +308,20 @@ const (
 	KeyUIPhoneVerify   = "ui.phone_verify_required"
 	// UI 默认问题
 	KeyUISampleQuestions = "ui.sample_questions"
-	// Admin 后台登录凭据
+	// 后台登录凭据
 	KeyAdminUser = "admin.username"
 	KeyAdminPass = "admin.password"
+	// 提示词预设管理
+	KeyPromptBuiltinPresets  = "prompts.builtin_presets"
+	KeyPromptRemotePresets   = "prompts.remote_presets"
+	KeyPromptBuiltinActive   = "prompts.builtin_active_name"
+	KeyPromptRemoteActive    = "prompts.remote_active_name"
+	// RAG 知识库
+	KeyRAGEnabled    = "rag.enabled"
+	KeyRAGSource     = "rag.source"
+	KeyRAGEmbedding  = "rag.embedding_model"
+	KeyRAGTopK       = "rag.top_k"
+	KeyRAGChunkSize  = "rag.chunk_size"
 )
 
 func validKey(k string) bool {
@@ -328,7 +339,9 @@ func validKey(k string) bool {
 		KeyUIShowDuration, KeyUIShowSteps, KeyUIShowImages,
 		KeyUITheme, KeyUIAppTitle, KeyUIAppSubtitle, KeyUIWorkflow,
 		KeyUIAdminPageSize, KeyUIChatPageSize, KeyUIPhoneRequired, KeyUIPhoneVerify, KeyUISampleQuestions,
-		KeyAdminUser, KeyAdminPass:
+		KeyAdminUser, KeyAdminPass,
+		KeyPromptBuiltinPresets, KeyPromptRemotePresets, KeyPromptBuiltinActive, KeyPromptRemoteActive,
+		KeyRAGEnabled, KeyRAGSource, KeyRAGEmbedding, KeyRAGTopK, KeyRAGChunkSize:
 		return true
 	}
 	return false
@@ -390,9 +403,18 @@ func toItems(c *config.Config) []ConfigItem {
 		mk(KeyUIChatPageSize, itoa(c.UI.ChatPageSize), "前端聊天消息分页默认大小"),
 		mk(KeyUIPhoneRequired, b(c.UI.PhoneRequired), "注册是否强制填写手机号"),
 		mk(KeyUIPhoneVerify, b(c.UI.PhoneVerifyRequired), "是否强制手机号验证（当前格式校验）"),
-		mk(KeyUISampleQuestions, c.UI.SampleQuestions, "前端示例问题列表（JSON 字符串数组，如 [\"问题1\",\"问题2\"]）"),
+		mk(KeyUISampleQuestions, c.UI.SampleQuestions, "前端示例问题列表（JSON 数组，支持 text/enabled/category 字段，如 [{\"text\":\"...\",\"enabled\":true,\"category\":\"销售\"}]）"),
 		mk(KeyAdminUser, "admin", "后台管理登录账号"),
 		mk(KeyAdminPass, "admin123", "后台管理登录密码"),
+		mk(KeyPromptBuiltinPresets, "[]", "内置场景提示词预设列表（JSON，如 [{\"name\":\"默认\",\"content\":\"...\",\"backups\":[]}]）"),
+		mk(KeyPromptRemotePresets, "[]", "远程场景提示词预设列表"),
+		mk(KeyPromptBuiltinActive, "", "内置场景当前激活的预设名称"),
+		mk(KeyPromptRemoteActive, "", "远程场景当前激活的预设名称"),
+		mk(KeyRAGEnabled, b(c.RAG.Enabled), "是否启用 RAG 知识库检索"),
+		mk(KeyRAGSource, c.RAG.Source, "知识库来源（本地文件路径/API 地址）"),
+		mk(KeyRAGEmbedding, c.RAG.EmbeddingModel, "向量嵌入模型名称"),
+		mk(KeyRAGTopK, itoa(c.RAG.TopK), "检索返回的 top-k 条数"),
+		mk(KeyRAGChunkSize, itoa(c.RAG.ChunkSize), "文档分块大小（字符数）"),
 	}
 }
 
@@ -503,6 +525,18 @@ func applyItem(c *config.Config, key, value string) error {
 		// admin.username 仅用于登录鉴权，不进入运行配置。
 	case KeyAdminPass:
 		// admin.password 仅用于登录鉴权，不进入运行配置。
+	case KeyPromptBuiltinPresets, KeyPromptRemotePresets, KeyPromptBuiltinActive, KeyPromptRemoteActive:
+		// prompts 预设管理键，存 DB 透传，不进入运行配置。
+	case KeyRAGEnabled:
+		c.RAG.Enabled = isTrue(value)
+	case KeyRAGSource:
+		c.RAG.Source = value
+	case KeyRAGEmbedding:
+		c.RAG.EmbeddingModel = value
+	case KeyRAGTopK:
+		c.RAG.TopK = atoi(value)
+	case KeyRAGChunkSize:
+		c.RAG.ChunkSize = atoi(value)
 	default:
 		// 未知 key 在 Update 入口已被拦截，这里兜底忽略。
 	}

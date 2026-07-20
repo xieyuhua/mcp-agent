@@ -49,7 +49,8 @@ export const users = {
   delete: (id) => request('/users/' + id, 'DELETE'),
   disable: (id, disabled) => request('/users/' + id + '/disable', 'POST', { disabled }),
   resetPassword: (id, password) => request('/users/' + id + '/password', 'POST', { password }),
-  setRole: (id, role) => request('/users/' + id + '/role', 'POST', { role })
+  setRole: (id, role) => request('/users/' + id + '/role', 'POST', { role }),
+  setDataRole: (id, data_role) => request('/users/' + id + '/data-role', 'POST', { data_role })
 }
 
 export const roles = {
@@ -94,6 +95,29 @@ export const logs = {
     const q = new URLSearchParams(params)
     return request('/activity-logs?' + q.toString())
   }
+}
+
+export const sampleQuestions = {
+  get: () => request('/sample-questions'),
+  save: (questions) => request('/sample-questions', 'PUT', { questions })
+}
+
+export const dataPermissions = {
+  list: (params = {}) => request('/data-permissions?' + new URLSearchParams(params).toString()),
+  set: (body) => request('/data-permissions', 'POST', body),
+  del: (params) => request('/data-permissions?' + new URLSearchParams(params).toString(), 'DELETE')
+}
+
+export const fieldPermissions = {
+  list: (params = {}) => request('/field-permissions?' + new URLSearchParams(params).toString()),
+  set: (body) => request('/field-permissions', 'POST', body),
+  del: (params) => request('/field-permissions?' + new URLSearchParams(params).toString(), 'DELETE')
+}
+
+export const maskRules = {
+  list: (params = {}) => request('/mask-rules?' + new URLSearchParams(params).toString()),
+  set: (body) => request('/mask-rules', 'POST', body),
+  del: (params) => request('/mask-rules?' + new URLSearchParams(params).toString(), 'DELETE')
 }
 
 export const skills = {

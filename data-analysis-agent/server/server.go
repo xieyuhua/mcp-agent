@@ -172,6 +172,7 @@ type askRequest struct {
 	MaxTokens   int     `json:"max_tokens"`
 	EnableChart *bool   `json:"enable_chart"` // 是否允许生成图表；nil=沿用（开启）
 	UserPrompt  string  `json:"user_prompt"`  // 用户自定义提示词；为空表示使用系统后台默认提示词
+	Mode        string  `json:"mode"`         // react | plan；为空表示沿用运行配置
 }
 
 func (s *Server) handleHealth(c *gin.Context) {
@@ -292,6 +293,7 @@ func (s *Server) handleAsk(c *gin.Context) {
 		}
 	}
 	opts := buildAskOpts(req.Model, req.Temperature, req.MaxTokens, req.EnableChart, userPrompt)
+	opts.Mode = req.Mode
 	opts.UserID = user.ID
 	opts.ConversationID = conv.ID
 
@@ -422,9 +424,11 @@ func (s *Server) handleAskStream(c *gin.Context, user *userdb.User, conv *userdb
 	var finalResult *agent.AskResult
 	var gotErr string
 	streamOpts.OnEvent = func(ev agent.StreamEvent) {
-		switch ev.Kind {
-		case agent.EventThinking:
-			send(map[string]interface{}{"kind": "thinking"})
+	switch ev.Kind {
+	case agent.EventPlan:
+		send(map[string]interface{}{"kind": "plan", "plan": ev.Plan})
+	case agent.EventThinking:
+		send(map[string]interface{}{"kind": "thinking"})
 		case agent.EventStepStart:
 			send(map[string]interface{}{"kind": "step_start", "step": ev.Step})
 		case agent.EventStepProgress:

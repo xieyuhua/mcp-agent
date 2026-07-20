@@ -20,7 +20,11 @@ const routes = [
       { path: 'config', name: 'Config', component: () => import('./views/Config.vue') },
       { path: 'prompts', name: 'Prompts', component: () => import('./views/Prompts.vue') },
       { path: 'logs', name: 'Logs', component: () => import('./views/Logs.vue') },
-      { path: 'skills', name: 'Skills', component: () => import('./views/Skills.vue') }
+      { path: 'skills', name: 'Skills', component: () => import('./views/Skills.vue') },
+      { path: 'sample-questions', name: 'SampleQuestions', component: () => import('./views/SampleQuestions.vue') },
+      { path: 'data-permissions', name: 'DataPermissions', component: () => import('./views/DataPermissions.vue') },
+      { path: 'field-permissions', name: 'FieldPermissions', component: () => import('./views/FieldPermissions.vue') },
+      { path: 'mask-rules', name: 'MaskRules', component: () => import('./views/MaskRules.vue') }
     ]
   }
 ]

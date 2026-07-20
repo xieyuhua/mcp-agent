@@ -47,12 +47,12 @@ async function submit() {
 
 <style scoped>
 .auth-card { max-width: 380px; margin: 80px auto; background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 28px 24px; }
-.auth-title { margin: 0 0 4px; font-size: 22px; font-weight: 800; background: linear-gradient(135deg, var(--accent), var(--accent-2)); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+.auth-title { margin: 0 0 4px; font-size: 22px; font-weight: 800; background: linear-gradient(135deg, var(--accent), var(--accent2)); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
 .auth-sub { color: var(--text-dim); font-size: 13px; margin-bottom: 20px; }
 .field { margin-bottom: 14px; }
-.field input { width: 100%; background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; color: var(--text); padding: 12px 13px; font-size: 14px; }
+.field input { width: 100%; background: var(--panel2); border: 1px solid var(--border); border-radius: 10px; color: var(--text); padding: 12px 13px; font-size: 14px; }
 .field input:focus { outline: none; border-color: var(--accent); }
-.primary { width: 100%; background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; border: none; border-radius: 8px; padding: 12px; font-size: 15px; font-weight: 600; cursor: pointer; }
+.primary { width: 100%; background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #fff; border: none; border-radius: 8px; padding: 12px; font-size: 15px; font-weight: 600; cursor: pointer; }
 .primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .err { color: var(--err); font-size: 13px; min-height: 18px; margin-top: 6px; }
 .switch-line { text-align: center; margin-top: 14px; font-size: 13px; color: var(--text-dim); }

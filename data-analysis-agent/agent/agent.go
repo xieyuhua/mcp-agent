@@ -10,6 +10,7 @@ import (
 
 	"company.com/data-analysis-agent/config"
 	"company.com/data-analysis-agent/internal/logger"
+	"company.com/data-analysis-agent/internal/permission"
 	"company.com/data-analysis-agent/llm"
 	"company.com/data-analysis-agent/mcpclient"
 	"company.com/data-analysis-agent/skill"
@@ -24,6 +25,7 @@ type Agent struct {
 	token   string
 	tools   []llm.Tool
 	schema  string
+	tableSchemas map[string]string // 表名→结构描述缓存
 
 	// extraMCPs 额外对接的远程 MCP 客户端（与主 MCP 并存）。
 	extraMCPs []*extraMCP
@@ -40,6 +42,11 @@ type Agent struct {
 
 	// callLogStore 调用日志存储（可选，HTTP 服务模式下注入 userdb）。
 	callLogStore CallLogStore
+
+	// authz 权限解析器（Agent 侧管理数据库角色权限）。
+	authz *permission.Resolver
+	// masker 脱敏解析器（Agent 侧管理数据脱敏）。
+	masker *permission.MaskResolver
 }
 
 // CallLogStore 调用日志存储接口，由 userdb.Store 实现。
@@ -57,7 +64,7 @@ type extraMCP struct {
 
 // New 构造 Agent：按配置启动 MCP（本地子进程或远程服务）、登录、预加载表结构。
 func New(cfg *config.Config, callLogStore CallLogStore) (*Agent, error) {
-	a := &Agent{cfg: cfg, callLogStore: callLogStore}
+	a := &Agent{cfg: cfg, callLogStore: callLogStore, tableSchemas: map[string]string{}}
 	// 加载技能目录（失败不致命，仅告警并继续；目录为空则无技能可用）。
 	skillStart := time.Now()
 	a.skills, _ = skill.LoadDir(cfg.SkillsDir)
@@ -139,15 +146,9 @@ func (a *Agent) initMCP(cfg *config.Config) error {
 	a.llm = llm.NewClient(cfg.LLM.Provider, cfg.LLM.BaseURL, cfg.LLM.Model, cfg.LLM.APIKey, cfg.LLM.Temperature, cfg.LLM.MaxTokens)
 	a.llm.OnLog = a.buildLLMLogCallback()
 
-	// 内置模式：登录获取 token（后续所有 MCP 工具调用都需要）
+	// 内置 MCP 不再需要登录鉴权，权限由 Agent 自身管理。
 	if builtin {
-		loginStart := time.Now()
-		if err := a.login(); err != nil {
-			a.logActivity("mcp_connect", "MCP 登录失败: "+err.Error(), a.cfg.MCP.Username, time.Since(loginStart).Milliseconds(), true, err.Error())
-			mainMCP.Close()
-			return err
-		}
-		a.logActivity("mcp_connect", "MCP 登录成功", a.cfg.MCP.Username, time.Since(loginStart).Milliseconds(), false, "")
+		logger.Infof("[agent] MCP 权限由 Agent 自身管理")
 	}
 
 	// 连接额外对接的远程 MCP 服务（可选，多个并存）。
@@ -186,6 +187,40 @@ func (a *Agent) SetCallLogStore(store CallLogStore) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.callLogStore = store
+}
+
+// InitPermissionResolver 初始化权限解析器与脱敏解析器。
+// store 需同时实现 permission.PolicyStore 和 permission.MaskStore 接口。
+func (a *Agent) InitPermissionResolver(store interface {
+	permission.PolicyStore
+	permission.MaskStore
+}) {
+	a.authz = permission.NewResolver(store)
+	a.masker = permission.NewMaskResolver(store)
+	_ = a.authz.Refresh("")
+	_ = a.masker.Refresh("")
+	logger.Infof("[agent] 权限解析器已初始化（Agent 侧管理数据库角色权限）")
+}
+
+// PermissionResolver 返回当前权限解析器。
+// TableSchemas 返回表名→结构描述缓存。
+func (a *Agent) TableSchemas() map[string]string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	out := make(map[string]string, len(a.tableSchemas))
+	for k, v := range a.tableSchemas {
+		out[k] = v
+	}
+	return out
+}
+
+func (a *Agent) PermissionResolver() *permission.Resolver {
+	return a.authz
+}
+
+// MaskResolver 返回当前脱敏解析器。
+func (a *Agent) MaskResolver() *permission.MaskResolver {
+	return a.masker
 }
 
 // ApplyConfig 热更新配置：重建 LLM 客户端；若 MCP 相关配置发生变化则重建 MCP 连接。
@@ -770,10 +805,8 @@ func (a *Agent) loadSchema(tables []string) string {
 	found := false
 	for _, t := range tables {
 		schemaStart := time.Now()
-		text, isErr, err := a.mcp.CallTool("describe_table", map[string]interface{}{
-			"token": a.token,
-			"table": t,
-		}, nil)
+		params := map[string]interface{}{"table": t}
+		text, isErr, err := a.mcp.CallTool("describe_table", params, nil)
 		schemaDur := time.Since(schemaStart).Milliseconds()
 		// 初始化阶段的 MCP 调用也写入 mcp_call_logs，便于追溯首次表结构获取；
 		// 以 user_id="system" 标记，与正常对话调用区分（convID 为空）。
@@ -789,7 +822,8 @@ func (a *Agent) loadSchema(tables []string) string {
 		}
 		sb.WriteString("- " + t + ": " + text + "\n")
 		found = true
-		a.logActivity("schema_load", fmt.Sprintf("获取表 %s 结构成功（长度=%d）", t, len(text)), t, schemaDur, false, "")
+		a.tableSchemas[t] = text
+		a.logActivity("schema_load", fmt.Sprintf("获取表 %s 结构成功: %s", t, text), t, schemaDur, false, "")
 	}
 	if !found {
 		return ""
@@ -821,6 +855,27 @@ func (a *Agent) systemPrompt(userPrompt string) string {
 	return p
 }
 
+// parsePlan 解析 LLM 输出的计划文本为步骤列表。
+func (a *Agent) parsePlan(text string) []string {
+	var steps []string
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		// 匹配 "1. xxx" "1、xxx" "- xxx" "* xxx"
+		if len(trimmed) > 2 && (trimmed[0] == '-' || trimmed[0] == '*') {
+			steps = append(steps, strings.TrimSpace(trimmed[1:]))
+		} else if len(trimmed) > 3 && trimmed[0] >= '1' && trimmed[0] <= '9' && strings.ContainsAny(trimmed[1:3], ".、") {
+			steps = append(steps, strings.TrimSpace(trimmed[2:]))
+		}
+	}
+	if len(steps) == 0 {
+		steps = []string{text}
+	}
+	return steps
+}
+
 // AskOptions 单次提问的可选覆盖项（来自 Web UI 的"基础设置"）。
 // 字段为空/零值表示沿用运行配置，不覆盖。
 type AskOptions struct {
@@ -829,6 +884,7 @@ type AskOptions struct {
 	MaxTokens   int     `json:"max_tokens"`   // 覆盖单次生成上限（<=0 表示沿用）
 	EnableChart *bool   `json:"enable_chart"` // 是否允许模型生成图表；nil=沿用（开启），false=关闭
 	UserPrompt  string  `json:"user_prompt"`  // 用户自定义提示词追加；为空表示仅使用系统提示词
+	Mode        string  `json:"mode"`         // 覆盖运行模式：react | plan；为空表示沿用运行配置
 	// UserID 当前用户 ID，用于写入调用日志。
 	UserID string `json:"-"`
 	// ConversationID 当前会话 ID，用于写入调用日志。
@@ -877,6 +933,7 @@ const (
 	EventStep            StreamEventKind = "step"              // 一次工具调用完成（含步骤日志）
 	EventStepProgress    StreamEventKind = "step_progress"     // 工具执行期间的流式进度（如「已读取 N 行」），前端实时刷新"调用中"卡片
 	EventStepResultDelta StreamEventKind = "step_result_delta" // 工具结果流式片段（让"分析过程"结果像打字机一样逐步出现）
+	EventPlan            StreamEventKind = "plan"              // plan 模式下生成的计划步骤列表
 	EventThinking        StreamEventKind = "thinking"          // LLM 思考阶段（尚未产出 token/工具调用）；调用方可据此显示"思考中…"避免像卡死
 	EventAnswerDelta     StreamEventKind = "answer_delta"      // 最终回答的增量文本（逐 token 推送，实现打字机效果）
 	EventAnswer          StreamEventKind = "answer"            // 最终文字结论（完整文本，流式结束时兜底/校正）
@@ -889,6 +946,7 @@ const (
 type StreamEvent struct {
 	Kind   StreamEventKind `json:"kind"`
 	Step   *StepLog        `json:"step,omitempty"`   // EventStep / EventStepResultDelta 等步骤相关事件携带
+	Plan   []string        `json:"plan,omitempty"`   // EventPlan 时携带计划步骤列表
 	Text   string          `json:"text,omitempty"`   // EventAnswer 时携带最终回答
 	Result *AskResult      `json:"result,omitempty"` // EventResult 时携带完整结构化结果
 	Error  string          `json:"error,omitempty"`  // EventError 时携带错误信息
@@ -1130,6 +1188,28 @@ func (a *Agent) AskRichWithHistory(history []HistoryItem, question string, opts 
 		if opts != nil && opts.OnEvent != nil {
 			opts.OnEvent(ev)
 		}
+	}
+
+	// Plan 模式：先生成计划，再执行。
+	agentMode := a.cfg.Agent.Mode
+	if opts != nil && opts.Mode != "" {
+		agentMode = opts.Mode
+	}
+	if agentMode == "plan" {
+		planMsgs := []llm.Message{
+			{Role: "system", Content: system + "\n\n请先制定一个详细的分析计划，列出3-5个具体步骤。\n仅输出计划，不要执行工具。"},
+			{Role: "user", Content: question},
+		}
+		planResp, err := llmClient.Chat(planMsgs, nil)
+		if err == nil && planResp != nil {
+			planText := strings.TrimSpace(planResp.Content)
+			planSteps := a.parsePlan(planText)
+			onEvent(StreamEvent{Kind: EventPlan, Plan: planSteps})
+			// 将计划和执行指令注入消息上下文
+			messages = append(messages, llm.Message{Role: "assistant", Content: "## 分析计划\n\n" + planText})
+			messages = append(messages, llm.Message{Role: "user", Content: "请按照以上计划逐步执行。每完成一步，用工具获取数据后再进行下一步。所有步骤完成后给出最终分析结论。"})
+		}
+		// 即使 plan 生成失败也继续 ReAct 循环（退化到普通模式）
 	}
 
 	for step := 0; step < a.cfg.Agent.MaxSteps; step++ {

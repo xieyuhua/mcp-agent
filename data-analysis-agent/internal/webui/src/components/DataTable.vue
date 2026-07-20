@@ -22,7 +22,7 @@ const cols = computed(() => displayed.value.length ? Object.keys(displayed.value
 .table-wrap { overflow-x: auto; margin: 8px 0; border: 1px solid var(--border); border-radius: 8px; }
 table { width: 100%; border-collapse: collapse; font-size: 12px; }
 th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
-th { background: var(--panel-2); color: var(--text-dim); font-weight: 600; }
+th { background: var(--panel2); color: var(--text-dim); font-weight: 600; }
 td { color: var(--text); }
 .table-note { padding: 6px 10px; font-size: 12px; color: var(--text-dim); }
 .table-note a { color: var(--accent); cursor: pointer; }

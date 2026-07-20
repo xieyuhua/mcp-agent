@@ -1,8 +1,6 @@
 package repository
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"time"
 
 	"company.com/mcp-data-server/internal/model"
@@ -10,12 +8,7 @@ import (
 	"gorm.io/gorm"
 )
 
-func hashPW(pw string) string {
-	h := sha256.Sum256([]byte(pw))
-	return hex.EncodeToString(h[:])
-}
-
-// Seed 写入演示租户、多角色用户、客户与订单数据。
+// Seed 写入演示租户、客户与订单数据。
 func Seed(db *gorm.DB) error {
 	var cnt int64
 	db.Model(&model.Tenant{}).Count(&cnt)
@@ -28,17 +21,6 @@ func Seed(db *gorm.DB) error {
 		{ID: "t2", Name: "华南零售集团"},
 	}
 	if err := db.Create(&tenants).Error; err != nil {
-		return err
-	}
-
-	users := []model.User{
-		{ID: "u-admin", TenantID: "t1", Username: "admin", Password: hashPW("admin123"), Role: "super_admin", RegionID: "", StoreID: ""},
-		{ID: "u-region", TenantID: "t1", Username: "region1", Password: hashPW("region123"), Role: "region_manager", RegionID: "r1", StoreID: ""},
-		{ID: "u-store", TenantID: "t1", Username: "store1", Password: hashPW("store123"), Role: "store_manager", RegionID: "r1", StoreID: "s1"},
-		{ID: "u-staff", TenantID: "t1", Username: "staff1", Password: hashPW("staff123"), Role: "staff", RegionID: "r1", StoreID: "s1"},
-		{ID: "u-analyst", TenantID: "t1", Username: "analyst1", Password: hashPW("analyst123"), Role: "analyst", RegionID: "", StoreID: ""},
-	}
-	if err := db.Create(&users).Error; err != nil {
 		return err
 	}
 

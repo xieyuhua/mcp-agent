@@ -1,7 +1,8 @@
 // Package userdb 提供 Web UI 的用户体系（注册/登录/会话令牌）与多轮对话持久化
 // （会话 conversation + 消息 message），存储于 SQLite。
 //
-// 说明：这是 Agent 前端自身的账号体系，与 mcp-data-server 的数据权限账号相互独立。
+// 说明：该数据库同时也存储数据库角色权限策略（PermissionPolicy / FieldPermission / MaskRule），
+// 由 Agent 自身管理，不再依赖 MCP 端权限。
 package userdb
 
 import (
@@ -17,6 +18,8 @@ import (
 	"strings"
 	"time"
 
+	"company.com/data-analysis-agent/internal/permission"
+
 	"github.com/glebarez/sqlite"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -29,6 +32,7 @@ type User struct {
 	Phone     string    `gorm:"size:20;index" json:"phone,omitempty"`
 	Prompt    string    `gorm:"type:text" json:"prompt,omitempty"`
 	Role      string    `gorm:"size:32;index" json:"role"`
+	DataRole  string    `gorm:"size:32;index" json:"data_role"` // 数据库访问角色: super_admin|region_manager|store_manager|staff|analyst
 	Disabled  bool      `gorm:"not null;default:false" json:"disabled"`
 	Salt      string    `gorm:"size:32" json:"-"`
 	PassHash  string    `gorm:"size:128" json:"-"`
@@ -190,7 +194,7 @@ func New(dbPath string) (*Store, error) {
 	if err := configurePool(db); err != nil {
 		return nil, fmt.Errorf("configure user db pool: %w", err)
 	}
-	if err := db.AutoMigrate(&User{}, &Session{}, &Role{}, &AdminRole{}, &Conversation{}, &Message{}, &Admin{}, &LLMCallLog{}, &MCPCallLog{}, &RequestLog{}, &AgentActivityLog{}); err != nil {
+	if err := db.AutoMigrate(&User{}, &Session{}, &Role{}, &AdminRole{}, &Conversation{}, &Message{}, &Admin{}, &LLMCallLog{}, &MCPCallLog{}, &RequestLog{}, &AgentActivityLog{}, &permission.PermissionPolicy{}, &permission.MaskRule{}, &permission.FieldPermission{}); err != nil {
 		return nil, fmt.Errorf("migrate user db: %w", err)
 	}
 	store := &Store{db: db}
@@ -386,6 +390,7 @@ type UserView struct {
 	Username    string `json:"username"`
 	Role        string `json:"role"`
 	DisplayRole string `json:"display_role,omitempty"`
+	DataRole    string `json:"data_role,omitempty"`
 	Disabled    bool   `json:"disabled"`
 	CreatedAt   string `json:"created_at"`
 	UpdatedAt   string `json:"updated_at"`
@@ -435,6 +440,7 @@ func (s *Store) ListUsers(req ListUsersRequest) ([]UserView, int64, error) {
 			Username:    u.Username,
 			Role:        u.Role,
 			DisplayRole: roleMap[u.Role],
+			DataRole:    u.DataRole,
 			Disabled:    u.Disabled,
 			CreatedAt:   u.CreatedAt.Format(time.RFC3339),
 			UpdatedAt:   u.UpdatedAt.Format(time.RFC3339),
@@ -444,7 +450,7 @@ func (s *Store) ListUsers(req ListUsersRequest) ([]UserView, int64, error) {
 }
 
 // AdminCreateUser 后台管理员创建用户（可指定密码和角色）。
-func (s *Store) AdminCreateUser(username, phone, password, role string) (*User, error) {
+func (s *Store) AdminCreateUser(username, phone, password, role string, dataRole ...string) (*User, error) {
 	username = strings.TrimSpace(username)
 	phone = strings.TrimSpace(phone)
 	if len(username) < 2 || len(password) < 4 {
@@ -468,12 +474,17 @@ func (s *Store) AdminCreateUser(username, phone, password, role string) (*User, 
 			_ = s.UpsertRole(&Role{Name: role, DisplayName: role})
 		}
 	}
+	dr := ""
+	if len(dataRole) > 0 {
+		dr = dataRole[0]
+	}
 	salt := randHex(16)
 	u := &User{
 		ID:        uuid.NewString(),
 		Username:  username,
 		Phone:     phone,
 		Role:      role,
+		DataRole:  dr,
 		Disabled:  false,
 		Salt:      salt,
 		PassHash:  hashPassword(password, salt),
@@ -538,6 +549,14 @@ func (s *Store) SetUserRole(userID, role string) error {
 	}).Error
 }
 
+// SetUserDataRole 修改用户数据库访问角色。
+func (s *Store) SetUserDataRole(userID, dataRole string) error {
+	return s.db.Model(&User{}).Where("id = ?", userID).Updates(map[string]interface{}{
+		"data_role":  dataRole,
+		"updated_at": time.Now(),
+	}).Error
+}
+
 // ImportUsersCSV 从 CSV 导入用户。列：username,password,role,disabled（可选）。
 func (s *Store) ImportUsersCSV(r *bytes.Buffer) (int, error) {
 	cr := csv.NewReader(r)
@@ -561,6 +580,7 @@ func (s *Store) ImportUsersCSV(r *bytes.Buffer) (int, error) {
 		if role == "" {
 			role = "user"
 		}
+		dataRole := csvVal(row, idx, "data_role")
 		disabled := false
 		if v := csvVal(row, idx, "disabled"); v != "" {
 			disabled, _ = strconv.ParseBool(v)
@@ -572,11 +592,14 @@ func (s *Store) ImportUsersCSV(r *bytes.Buffer) (int, error) {
 		err := s.db.Where("username = ?", username).First(&u).Error
 		now := time.Now()
 		if err == nil {
-			// 更新已有用户：仅改密码、角色、禁用状态
+			// 更新已有用户：仅改密码、角色、数据角色、禁用状态
 			if err := s.SetUserPassword(u.ID, password); err != nil {
 				return imported, fmt.Errorf("第 %d 行：%w", i+2, err)
 			}
 			_ = s.SetUserRole(u.ID, role)
+			if dataRole != "" {
+				_ = s.SetUserDataRole(u.ID, dataRole)
+			}
 			_ = s.SetUserDisabled(u.ID, disabled)
 		} else if errors.Is(err, gorm.ErrRecordNotFound) {
 			salt := randHex(16)
@@ -584,6 +607,7 @@ func (s *Store) ImportUsersCSV(r *bytes.Buffer) (int, error) {
 				ID:        uuid.NewString(),
 				Username:  username,
 				Role:      role,
+				DataRole:  dataRole,
 				Disabled:  disabled,
 				Salt:      salt,
 				PassHash:  hashPassword(password, salt),
@@ -611,9 +635,9 @@ func (s *Store) ExportUsersCSV() ([]byte, error) {
 	// UTF-8 BOM for Excel
 	buf.Write([]byte{0xEF, 0xBB, 0xBF})
 	w := csv.NewWriter(buf)
-	_ = w.Write([]string{"username", "role", "disabled", "created_at"})
+	_ = w.Write([]string{"username", "role", "data_role", "disabled", "created_at"})
 	for _, u := range users {
-		_ = w.Write([]string{u.Username, u.Role, strconv.FormatBool(u.Disabled), u.CreatedAt.Format(time.RFC3339)})
+		_ = w.Write([]string{u.Username, u.Role, u.DataRole, strconv.FormatBool(u.Disabled), u.CreatedAt.Format(time.RFC3339)})
 	}
 	w.Flush()
 	return buf.Bytes(), w.Error()
@@ -1404,4 +1428,118 @@ func randHex(n int) string {
 func hashPassword(password, salt string) string {
 	h := sha256.Sum256([]byte(salt + ":" + password))
 	return hex.EncodeToString(h[:])
+}
+
+// ---- 权限策略持久化（实现 permission.PolicyStore / MaskStore）----
+
+// ListPolicies 列出某租户（含平台默认）的全部权限策略。
+func (s *Store) ListPolicies(tenantID string) ([]permission.PermissionPolicy, error) {
+	var list []permission.PermissionPolicy
+	err := s.db.Where("tenant_id = ? OR tenant_id = ?", tenantID, "").
+		Order("tenant_id ASC, role").Find(&list).Error
+	return list, err
+}
+
+// UpsertPolicy 新增或更新权限策略。
+func (s *Store) UpsertPolicy(p *permission.PermissionPolicy) error {
+	var existing permission.PermissionPolicy
+	err := s.db.Where("tenant_id = ? AND role = ?", p.TenantID, p.Role).First(&existing).Error
+	if err == gorm.ErrRecordNotFound {
+		return s.db.Create(p).Error
+	}
+	if err != nil {
+		return err
+	}
+	p.ID = existing.ID
+	return s.db.Model(&existing).Select("data_scope", "allowed_tables", "can_raw_sql", "updated_by").Updates(map[string]interface{}{
+		"data_scope":     p.DataScope,
+		"allowed_tables": p.AllowedTables,
+		"can_raw_sql":    p.CanRawSQL,
+		"updated_by":     p.UpdatedBy,
+	}).Error
+}
+
+// DeletePolicy 删除租户级权限策略。
+func (s *Store) DeletePolicy(tenantID, role string) error {
+	return s.db.Where("tenant_id = ? AND role = ?", tenantID, role).Delete(&permission.PermissionPolicy{}).Error
+}
+
+// ListFieldPermissions 列出某租户（含平台默认）的全部字段权限。
+func (s *Store) ListFieldPermissions(tenantID string) ([]permission.FieldPermission, error) {
+	var list []permission.FieldPermission
+	err := s.db.Where("tenant_id = ? OR tenant_id = ?", tenantID, "").
+		Order("tenant_id ASC, role, table_name, column").Find(&list).Error
+	return list, err
+}
+
+// UpsertFieldPermission 新增或更新字段权限。
+func (s *Store) UpsertFieldPermission(fp *permission.FieldPermission) error {
+	var existing permission.FieldPermission
+	err := s.db.Where("tenant_id = ? AND role = ? AND table_name = ? AND column = ?",
+		fp.TenantID, fp.Role, fp.TableName, fp.Column).First(&existing).Error
+	if err == gorm.ErrRecordNotFound {
+		return s.db.Create(fp).Error
+	}
+	if err != nil {
+		return err
+	}
+	fp.ID = existing.ID
+	return s.db.Model(&existing).Select("hidden", "updated_by").Updates(map[string]interface{}{
+		"hidden":     fp.Hidden,
+		"updated_by": fp.UpdatedBy,
+	}).Error
+}
+
+// DeleteFieldPermission 删除租户级字段权限。
+func (s *Store) DeleteFieldPermission(tenantID, role, table, column string) error {
+	return s.db.Where("tenant_id = ? AND role = ? AND table_name = ? AND column = ?",
+		tenantID, role, table, column).Delete(&permission.FieldPermission{}).Error
+}
+
+// ListMaskRules 列出某租户（含平台默认）的全部脱敏规则。
+func (s *Store) ListMaskRules(tenantID string) ([]permission.MaskRule, error) {
+	var list []permission.MaskRule
+	err := s.db.Where("tenant_id = ? OR tenant_id = ?", tenantID, "").
+		Order("tenant_id ASC, table_name, column").Find(&list).Error
+	return list, err
+}
+
+// GetMaskRulesAsMap 合并平台默认与租户级规则为表->列->规则（租户级覆盖平台级）。
+func (s *Store) GetMaskRulesAsMap(tenantID string) (map[string]map[string]permission.MaskRule, error) {
+	rules, err := s.ListMaskRules(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]map[string]permission.MaskRule{}
+	for _, rule := range rules {
+		if out[rule.TableName] == nil {
+			out[rule.TableName] = map[string]permission.MaskRule{}
+		}
+		out[rule.TableName][rule.Column] = rule
+	}
+	return out, nil
+}
+
+// UpsertMaskRule 新增或更新脱敏规则。
+func (s *Store) UpsertMaskRule(rule *permission.MaskRule) error {
+	var existing permission.MaskRule
+	err := s.db.Where("tenant_id = ? AND table_name = ? AND column = ?", rule.TenantID, rule.TableName, rule.Column).First(&existing).Error
+	if err == gorm.ErrRecordNotFound {
+		return s.db.Create(rule).Error
+	}
+	if err != nil {
+		return err
+	}
+	rule.ID = existing.ID
+	return s.db.Model(&existing).Select("mask_type", "enabled", "updated_by").Updates(map[string]interface{}{
+		"mask_type":  rule.MaskType,
+		"enabled":    rule.Enabled,
+		"updated_by": rule.UpdatedBy,
+	}).Error
+}
+
+// DeleteMaskRule 删除租户级脱敏规则。
+func (s *Store) DeleteMaskRule(tenantID, table, column string) error {
+	return s.db.Where("tenant_id = ? AND table_name = ? AND column = ?", tenantID, table, column).
+		Delete(&permission.MaskRule{}).Error
 }

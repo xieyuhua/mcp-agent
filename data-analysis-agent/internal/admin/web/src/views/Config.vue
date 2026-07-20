@@ -18,7 +18,8 @@ const MODULES = [
   { prefix: 'mcp_remote', label: '远程 MCP（HTTP 服务）', icon: '🌐', desc: '对接远程 MCP 服务（如 llama.cpp）：地址、传输方式与鉴权' },
   { prefix: 'agent', label: '智能体 Agent', icon: '🧠', desc: '推理步数、工具与记忆窗口' },
   { prefix: 'log', label: '日志 Log', icon: '📝', desc: '运行日志落盘与目录' },
-  { prefix: 'ui', label: '界面 UI', icon: '🎨', desc: '展示开关、主题与应用信息' }
+  { prefix: 'ui', label: '界面 UI', icon: '🎨', desc: '展示开关、主题与应用信息' },
+  { prefix: 'rag', label: 'RAG 知识库', icon: '📚', desc: '知识库检索增强生成配置' }
 ]
 
 // 每个 mcp.* 键归属哪个模块（本地 / 远程）。其余前缀按首段归类；
@@ -32,6 +33,7 @@ function moduleOf(key) {
   if (key.startsWith('agent.')) return 'agent'
   if (key.startsWith('log.')) return 'log'
   if (key.startsWith('ui.')) return 'ui'
+  if (key.startsWith('rag.')) return 'rag'
   return ''
 }
 
@@ -40,7 +42,10 @@ function moduleOf(key) {
 // - mcp.password / admin.password：密码修改已有后台右上角专用入口，配置页不再展示明文密码框；
 // - prompts.*：提示词已独立为单独页面；
 // - admin.* / 未知键：不在本页展示。
-const HIDDEN_KEYS = new Set(['mcp.mode', 'mcp.password', 'admin.password'])
+const HIDDEN_KEYS = new Set(['mcp.mode', 'mcp.password', 'admin.password',
+  'prompts.builtin', 'prompts.remote',
+  'prompts.builtin_presets', 'prompts.remote_presets',
+  'prompts.builtin_active_name', 'prompts.remote_active_name'])
 
 // 每个配置项的展示元数据：label 名称、type 输入类型、options 可选项。
 const META = {
@@ -66,6 +71,7 @@ const META = {
   'mcp.headers': { label: '自定义请求头 Headers', type: 'textarea', placeholder: 'JSON 对象，如 {"X-Foo":"bar"}；留空=不设置', desc: '对接需要鉴权的远程 MCP（如 llama.cpp）时，在此填写额外 HTTP 头' },
   'mcp.extra': { label: '额外远程服务', type: 'textarea' },
   'agent.max_steps': { label: '最大推理步数', type: 'number' },
+  'agent.mode': { label: '运行模式', type: 'select', options: ['react', 'plan'] },
   'agent.use_native_tools': { label: '原生工具调用', type: 'bool' },
   'agent.max_result_rows': { label: '工具返回最大行数', type: 'number' },
   'agent.memory_max_history': { label: '上下文窗口(条)', type: 'number' },
@@ -86,10 +92,14 @@ const META = {
   'ui.workflow_steps': { label: '流程步骤文案', type: 'text' },
   'ui.admin_page_size': { label: '后台分页大小', type: 'number' },
   'ui.chat_page_size': { label: '聊天分页大小', type: 'number' },
-  'ui.sample_questions': { label: '示例问题列表', type: 'textarea', desc: 'JSON 字符串数组，前端 "试试以下问题" 展示，如 ["问题1","问题2"]' },
   'ui.phone_required': { label: '强制手机号', type: 'bool' },
   'ui.phone_verify_required': { label: '强制手机验证', type: 'bool' },
-  'admin.username': { label: '登录账号', type: 'text' }
+  'admin.username': { label: '登录账号', type: 'text' },
+  'rag.enabled': { label: '启用知识库', type: 'bool' },
+  'rag.source': { label: '知识库来源', type: 'text', placeholder: '本地文件路径 或 API 地址' },
+  'rag.embedding_model': { label: '向量模型', type: 'text', placeholder: '如 text-embedding-ada-002' },
+  'rag.top_k': { label: 'Top-K 检索', type: 'number', desc: '检索返回的 top-k 条相关片段' },
+  'rag.chunk_size': { label: '分块大小', type: 'number', desc: '文档分块大小（字符数）' }
 }
 
 // 推断未在 META 中登记的配置项类型（兜底）。

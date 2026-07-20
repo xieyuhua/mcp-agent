@@ -64,9 +64,6 @@ func (h *ToolHandler) resolveWorkPath(rel string) (string, error) {
 }
 
 func (h *ToolHandler) readFile(args map[string]interface{}) (interface{}, error) {
-	if _, _, err := h.ctxFromArgs(args); err != nil {
-		return nil, err
-	}
 	rel, _ := args["path"].(string)
 	if rel == "" {
 		return nil, fmt.Errorf("path is required")
@@ -104,9 +101,6 @@ func (h *ToolHandler) readFile(args map[string]interface{}) (interface{}, error)
 }
 
 func (h *ToolHandler) writeFile(args map[string]interface{}) (interface{}, error) {
-	if _, _, err := h.ctxFromArgs(args); err != nil {
-		return nil, err
-	}
 	rel, _ := args["path"].(string)
 	if rel == "" {
 		return nil, fmt.Errorf("path is required")
@@ -130,9 +124,6 @@ func (h *ToolHandler) writeFile(args map[string]interface{}) (interface{}, error
 }
 
 func (h *ToolHandler) appendFile(args map[string]interface{}) (interface{}, error) {
-	if _, _, err := h.ctxFromArgs(args); err != nil {
-		return nil, err
-	}
 	rel, _ := args["path"].(string)
 	if rel == "" {
 		return nil, fmt.Errorf("path is required")
@@ -162,9 +153,6 @@ func (h *ToolHandler) appendFile(args map[string]interface{}) (interface{}, erro
 }
 
 func (h *ToolHandler) listDir(args map[string]interface{}) (interface{}, error) {
-	if _, _, err := h.ctxFromArgs(args); err != nil {
-		return nil, err
-	}
 	rel, _ := args["path"].(string)
 	p, err := h.resolveWorkPath(rel)
 	if err != nil {
@@ -195,9 +183,6 @@ func (h *ToolHandler) listDir(args map[string]interface{}) (interface{}, error) 
 }
 
 func (h *ToolHandler) makeDir(args map[string]interface{}) (interface{}, error) {
-	if _, _, err := h.ctxFromArgs(args); err != nil {
-		return nil, err
-	}
 	rel, _ := args["path"].(string)
 	if rel == "" {
 		return nil, fmt.Errorf("path is required")
@@ -216,9 +201,6 @@ func (h *ToolHandler) makeDir(args map[string]interface{}) (interface{}, error) 
 }
 
 func (h *ToolHandler) deleteFile(args map[string]interface{}) (interface{}, error) {
-	if _, _, err := h.ctxFromArgs(args); err != nil {
-		return nil, err
-	}
 	rel, _ := args["path"].(string)
 	if rel == "" {
 		return nil, fmt.Errorf("path is required")
@@ -244,9 +226,6 @@ func (h *ToolHandler) deleteFile(args map[string]interface{}) (interface{}, erro
 }
 
 func (h *ToolHandler) readDirTree(args map[string]interface{}) (interface{}, error) {
-	if _, _, err := h.ctxFromArgs(args); err != nil {
-		return nil, err
-	}
 	rel, _ := args["path"].(string)
 	p, err := h.resolveWorkPath(rel)
 	if err != nil {

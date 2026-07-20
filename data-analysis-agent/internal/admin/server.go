@@ -16,10 +16,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"company.com/data-analysis-agent/agent"
 	"company.com/data-analysis-agent/internal/admin/web"
 	"company.com/data-analysis-agent/internal/confdb"
+	"company.com/data-analysis-agent/internal/permission"
 	"company.com/data-analysis-agent/internal/userdb"
 	"company.com/data-analysis-agent/mcpclient"
 	"company.com/data-analysis-agent/skill"
@@ -51,6 +53,13 @@ var AdminPermissions = []Permission{
 	{Code: "skill:read", Name: "技能查看", Module: "技能管理"},
 	{Code: "skill:write", Name: "技能新增/编辑/重载", Module: "技能管理"},
 	{Code: "skill:delete", Name: "技能删除", Module: "技能管理"},
+	{Code: "data_role:write", Name: "用户数据角色设置", Module: "数据权限管理"},
+	{Code: "data_perm:read", Name: "数据权限策略查看", Module: "数据权限管理"},
+	{Code: "data_perm:write", Name: "数据权限策略设置", Module: "数据权限管理"},
+	{Code: "field_perm:read", Name: "字段权限查看", Module: "数据权限管理"},
+	{Code: "field_perm:write", Name: "字段权限设置", Module: "数据权限管理"},
+	{Code: "mask_rule:read", Name: "脱敏规则查看", Module: "数据权限管理"},
+	{Code: "mask_rule:write", Name: "脱敏规则设置", Module: "数据权限管理"},
 }
 
 // Permission 描述一项可分配的权限。
@@ -148,6 +157,21 @@ func (s *Server) buildRouter() *gin.Engine {
 		api.PUT("/skills/:name", s.requireAuth(), s.requirePerm("skill:write"), s.handleUpdateSkill)
 		api.DELETE("/skills/:name", s.requireAuth(), s.requirePerm("skill:delete"), s.handleDeleteSkill)
 		api.POST("/reload-skills", s.requireAuth(), s.requirePerm("skill:write"), s.handleReloadSkills)
+
+		api.GET("/sample-questions", s.requireAuth(), s.requirePerm("config:write"), s.handleGetSampleQuestions)
+		api.PUT("/sample-questions", s.requireAuth(), s.requirePerm("config:write"), s.handleSetSampleQuestions)
+
+		// 数据库角色权限管理（Agent 侧）
+		api.POST("/users/:id/data-role", s.requireAuth(), s.requirePerm("data_role:write"), s.handleUserDataRole)
+		api.GET("/data-permissions", s.requireAuth(), s.requirePerm("data_perm:read"), s.handleDataPolicies)
+		api.POST("/data-permissions", s.requireAuth(), s.requirePerm("data_perm:write"), s.handleSetDataPolicy)
+		api.DELETE("/data-permissions", s.requireAuth(), s.requirePerm("data_perm:write"), s.handleDeleteDataPolicy)
+		api.GET("/field-permissions", s.requireAuth(), s.requirePerm("field_perm:read"), s.handleFieldPermissions)
+		api.POST("/field-permissions", s.requireAuth(), s.requirePerm("field_perm:write"), s.handleSetFieldPermission)
+		api.DELETE("/field-permissions", s.requireAuth(), s.requirePerm("field_perm:write"), s.handleDeleteFieldPermission)
+		api.GET("/mask-rules", s.requireAuth(), s.requirePerm("mask_rule:read"), s.handleMaskRules)
+		api.POST("/mask-rules", s.requireAuth(), s.requirePerm("mask_rule:write"), s.handleSetMaskRule)
+		api.DELETE("/mask-rules", s.requireAuth(), s.requirePerm("mask_rule:write"), s.handleDeleteMaskRule)
 	}
 
 	// Vue 后台管理构建产物：统一通过 /admin 和 /admin/* 提供，找不到的文件回退到 index.html。
@@ -503,6 +527,33 @@ func (s *Server) handleReset(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true, "reset": true})
 }
 
+func (s *Server) handleGetSampleQuestions(c *gin.Context) {
+	cfg := s.store.Get()
+	q := cfg.UI.SampleQuestions
+	c.JSON(http.StatusOK, gin.H{"questions": q})
+}
+
+func (s *Server) handleSetSampleQuestions(c *gin.Context) {
+	var req struct {
+		Questions string `json:"questions"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求体解析失败: " + err.Error()})
+		return
+	}
+	if err := s.store.Update(map[string]string{confdb.KeyUISampleQuestions: req.Questions}); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := s.ag.ApplyConfig(s.store.Get()); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "配置已保存，但应用到运行实例失败: " + err.Error(),
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "applied": true})
+}
+
 // handleMCPTest 后端实测远程 MCP 连接（同源，不受浏览器 CORS 限制）。
 // 可选传入 base_url/transport/api_key 覆盖当前配置，便于“先测试再保存”。
 // 复用与运行时一致的 mcpclient，确保测试结果等价于实际对接效果。
@@ -595,12 +646,13 @@ func (s *Server) handleUsers(c *gin.Context) {
 			Phone    string `json:"phone"`
 			Password string `json:"password"`
 			Role     string `json:"role"`
+			DataRole string `json:"data_role"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "请求体解析失败"})
 			return
 		}
-		u, err := s.users.AdminCreateUser(req.Username, req.Phone, req.Password, req.Role)
+		u, err := s.users.AdminCreateUser(req.Username, req.Phone, req.Password, req.Role, req.DataRole)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
@@ -921,7 +973,7 @@ func (s *Server) handleActivityLogs(c *gin.Context) {
 
 // handleListSkills 返回当前已加载技能列表（无需重载）。
 func (s *Server) handleListSkills(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"skills": s.ag.SkillNames()})
+	c.JSON(http.StatusOK, gin.H{"skills": s.skillInfos()})
 }
 
 // skillFilePath 返回技能文件在磁盘上的完整路径。先检查 name.md，再检查 name+normalized-name.md。
@@ -985,7 +1037,7 @@ func (s *Server) handleCreateSkill(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "技能已创建但重载失败: " + err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true, "skills": s.ag.SkillNames()})
+	c.JSON(http.StatusOK, gin.H{"ok": true, "skills": s.skillInfos()})
 }
 
 // handleUpdateSkill 更新技能文件并重载。
@@ -1031,7 +1083,7 @@ func (s *Server) handleUpdateSkill(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "技能已更新但重载失败: " + err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true, "skills": s.ag.SkillNames()})
+	c.JSON(http.StatusOK, gin.H{"ok": true, "skills": s.skillInfos()})
 }
 
 // handleDeleteSkill 删除技能文件并重载。
@@ -1055,7 +1107,22 @@ func (s *Server) handleDeleteSkill(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "技能已删除但重载失败: " + err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true, "skills": s.ag.SkillNames()})
+	c.JSON(http.StatusOK, gin.H{"ok": true, "skills": s.skillInfos()})
+}
+
+// skillInfos 返回所有技能的增强信息（含描述和自动标记）。
+func (s *Server) skillInfos() []map[string]interface{} {
+	names := s.ag.SkillNames()
+	out := make([]map[string]interface{}, 0, len(names))
+	for _, n := range names {
+		desc := s.ag.SkillDescription(n)
+		out = append(out, map[string]interface{}{
+			"name":           n,
+			"description":    desc,
+			"auto_generated": strings.HasPrefix(n, "auto_"),
+		})
+	}
+	return out
 }
 
 // handleReloadSkills 运行时热重载技能目录（无需重启进程）。
@@ -1067,7 +1134,7 @@ func (s *Server) handleReloadSkills(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true, "skills": s.ag.SkillNames()})
+	c.JSON(http.StatusOK, gin.H{"ok": true, "skills": s.skillInfos()})
 }
 
 // ---- 管理员 ----
@@ -1163,6 +1230,247 @@ func (s *Server) handleAdminRole(c *gin.Context) {
 	if err := s.users.SetAdminRole(c.Param("id"), body.Role); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// ---- 用户数据角色 ----
+
+func (s *Server) handleUserDataRole(c *gin.Context) {
+	if !s.usersReady(c) {
+		return
+	}
+	var body struct {
+		DataRole string `json:"data_role"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求体解析失败"})
+		return
+	}
+	if err := s.users.SetUserDataRole(c.Param("id"), body.DataRole); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// ---- 数据权限策略管理 ----
+
+func (s *Server) handleDataPolicies(c *gin.Context) {
+	if !s.usersReady(c) {
+		return
+	}
+	tenantID := c.Query("tenant_id")
+	policies, err := s.users.ListPolicies(tenantID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"policies": policies})
+}
+
+func (s *Server) handleSetDataPolicy(c *gin.Context) {
+	if !s.usersReady(c) {
+		return
+	}
+	var req struct {
+		TenantID      string   `json:"tenant_id"`
+		Role          string   `json:"role"`
+		DataScope     string   `json:"data_scope"`
+		AllowedTables []string `json:"allowed_tables"`
+		CanRawSQL     bool     `json:"can_raw_sql"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求体解析失败"})
+		return
+	}
+	if req.Role == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "role 不能为空"})
+		return
+	}
+	p := &permission.PermissionPolicy{
+		TenantID:      req.TenantID,
+		Role:          req.Role,
+		DataScope:     req.DataScope,
+		AllowedTables: strings.Join(req.AllowedTables, ","),
+		CanRawSQL:     req.CanRawSQL,
+		UpdatedBy:     sessionFromCtx(c).Username,
+		UpdatedAt:     time.Now(),
+	}
+	if err := s.users.UpsertPolicy(p); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	// 刷新 Agent 权限缓存
+	if s.ag.PermissionResolver() != nil {
+		_ = s.ag.PermissionResolver().Refresh(req.TenantID)
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (s *Server) handleDeleteDataPolicy(c *gin.Context) {
+	if !s.usersReady(c) {
+		return
+	}
+	tenantID := c.Query("tenant_id")
+	role := c.Query("role")
+	if err := s.users.DeletePolicy(tenantID, role); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if s.ag.PermissionResolver() != nil {
+		_ = s.ag.PermissionResolver().Refresh(tenantID)
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// ---- 字段权限管理 ----
+
+func (s *Server) handleFieldPermissions(c *gin.Context) {
+	if !s.usersReady(c) {
+		return
+	}
+	tenantID := c.Query("tenant_id")
+	fields, err := s.users.ListFieldPermissions(tenantID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"field_permissions": fields})
+}
+
+type setFieldPermReq struct {
+	TenantID  string `json:"tenant_id"`
+	Role      string `json:"role"`
+	TableName string `json:"table_name"`
+	Column    string `json:"column"`
+	Hidden    bool   `json:"hidden"`
+}
+
+func (s *Server) handleSetFieldPermission(c *gin.Context) {
+	if !s.usersReady(c) {
+		return
+	}
+	var req setFieldPermReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求体解析失败"})
+		return
+	}
+	if req.Role == "" || req.TableName == "" || req.Column == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "role/table_name/column 不能为空"})
+		return
+	}
+	fp := &permission.FieldPermission{
+		TenantID:  req.TenantID,
+		Role:      req.Role,
+		TableName: req.TableName,
+		Column:    req.Column,
+		Hidden:    req.Hidden,
+		UpdatedBy: sessionFromCtx(c).Username,
+		UpdatedAt: time.Now(),
+	}
+	if err := s.users.UpsertFieldPermission(fp); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if s.ag.PermissionResolver() != nil {
+		_ = s.ag.PermissionResolver().Refresh(req.TenantID)
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (s *Server) handleDeleteFieldPermission(c *gin.Context) {
+	if !s.usersReady(c) {
+		return
+	}
+	if err := s.users.DeleteFieldPermission(
+		c.Query("tenant_id"),
+		c.Query("role"),
+		c.Query("table_name"),
+		c.Query("column"),
+	); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if s.ag.PermissionResolver() != nil {
+		_ = s.ag.PermissionResolver().Refresh(c.Query("tenant_id"))
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// ---- 脱敏规则管理 ----
+
+func (s *Server) handleMaskRules(c *gin.Context) {
+	if !s.usersReady(c) {
+		return
+	}
+	tenantID := c.Query("tenant_id")
+	rules, err := s.users.ListMaskRules(tenantID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"mask_rules": rules})
+}
+
+type setMaskRuleReq struct {
+	TenantID  string `json:"tenant_id"`
+	TableName string `json:"table_name"`
+	Column    string `json:"column"`
+	MaskType  string `json:"mask_type"`
+	Enabled   *bool  `json:"enabled"`
+}
+
+func (s *Server) handleSetMaskRule(c *gin.Context) {
+	if !s.usersReady(c) {
+		return
+	}
+	var req setMaskRuleReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求体解析失败"})
+		return
+	}
+	if req.TableName == "" || req.Column == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "table_name/column 不能为空"})
+		return
+	}
+	enabled := true
+	if req.Enabled != nil {
+		enabled = *req.Enabled
+	}
+	rule := &permission.MaskRule{
+		TenantID:  req.TenantID,
+		TableName: req.TableName,
+		Column:    req.Column,
+		MaskType:  req.MaskType,
+		Enabled:   enabled,
+		UpdatedBy: sessionFromCtx(c).Username,
+		UpdatedAt: time.Now(),
+	}
+	if err := s.users.UpsertMaskRule(rule); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if s.ag.MaskResolver() != nil {
+		_ = s.ag.MaskResolver().Refresh(req.TenantID)
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (s *Server) handleDeleteMaskRule(c *gin.Context) {
+	if !s.usersReady(c) {
+		return
+	}
+	if err := s.users.DeleteMaskRule(
+		c.Query("tenant_id"),
+		c.Query("table_name"),
+		c.Query("column"),
+	); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if s.ag.MaskResolver() != nil {
+		_ = s.ag.MaskResolver().Refresh(c.Query("tenant_id"))
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }

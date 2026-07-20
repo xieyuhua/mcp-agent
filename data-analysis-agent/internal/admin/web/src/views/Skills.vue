@@ -137,12 +137,16 @@ onMounted(load)
       <div class="empty" v-else-if="!loading">暂无技能</div>
 
       <div class="skill-list" v-if="list.length">
-        <div v-for="name in list" :key="name" class="skill-item">
-          <span class="skill-icon">📋</span>
-          <span class="skill-name">{{ name }}</span>
+        <div v-for="sk in list" :key="sk.name" class="skill-item">
+          <span class="skill-icon">{{ sk.auto_generated ? '🤖' : '📋' }}</span>
+          <div class="skill-info">
+            <span class="skill-name">{{ sk.name }}</span>
+            <span class="skill-desc">{{ sk.description }}</span>
+          </div>
+          <span v-if="sk.auto_generated" class="badge-auto" title="由多轮对话自动压缩生成">自动</span>
           <div class="skill-actions">
-            <button class="btn-sm" @click="openEdit(name)">编辑</button>
-            <button class="btn-sm btn-danger" @click="delSkill(name)">删除</button>
+            <button class="btn-sm" @click="openEdit(sk.name)">编辑</button>
+            <button v-if="!sk.auto_generated" class="btn-sm btn-danger" @click="delSkill(sk.name)">删除</button>
           </div>
         </div>
       </div>
@@ -169,9 +173,12 @@ onMounted(load)
 .empty { text-align: center; padding: 40px 20px; color: var(--muted); font-size: 14px; }
 .skill-list { display: flex; flex-direction: column; gap: 6px; }
 .skill-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--radius); background: var(--panel2); }
-.skill-icon { font-size: 16px; }
-.skill-name { flex: 1; font-size: 14px; font-weight: 600; }
-.skill-actions { display: flex; gap: 6px; }
+.skill-icon { font-size: 16px; flex: 0 0 24px; text-align: center; }
+.skill-info { flex: 1; min-width: 0; }
+.skill-name { font-size: 14px; font-weight: 600; display: block; }
+.skill-desc { font-size: 12px; color: var(--muted); display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.badge-auto { font-size: 10px; color: var(--warn); background: rgba(255,176,32,0.12); padding: 2px 8px; border-radius: 8px; white-space: nowrap; }
+.skill-actions { display: flex; gap: 6px; flex-shrink: 0; }
 .editor { border-left: 3px solid var(--primary); }
 .editor-title { margin: 0 0 16px; font-size: 15px; }
 .field { margin-bottom: 14px; }

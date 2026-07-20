@@ -12,7 +12,7 @@ const allRoles = ref([])
 const loading = ref(false)
 
 const modal = ref(false)
-const form = ref({ username: '', phone: '', password: '', role: '' })
+const form = ref({ username: '', phone: '', password: '', role: '', data_role: '' })
 const editing = ref(null)
 const resetPwdModal = ref(false)
 const resetPwd = ref('')
@@ -36,13 +36,13 @@ onMounted(async () => {
 
 function openCreate() {
   editing.value = null
-  form.value = { username: '', phone: '', password: '', role: allRoles.value[0]?.name || 'user' }
+  form.value = { username: '', phone: '', password: '', role: allRoles.value[0]?.name || 'user', data_role: '' }
   modal.value = true
 }
 
 function openEdit(item) {
   editing.value = item
-  form.value = { username: item.username, phone: '', password: '', role: item.role }
+  form.value = { username: item.username, phone: '', password: '', role: item.role, data_role: item.data_role || '' }
   modal.value = true
 }
 
@@ -52,6 +52,9 @@ async function save() {
     if (editing.value) {
       if (form.value.role !== editing.value.role) {
         await users.setRole(editing.value.id, form.value.role)
+      }
+      if (form.value.data_role !== (editing.value.data_role || '')) {
+        await users.setDataRole(editing.value.id, form.value.data_role)
       }
       if (form.value.password) {
         await users.resetPassword(editing.value.id, form.value.password)
@@ -127,6 +130,7 @@ function changePage(p) {
             <tr>
               <th>用户名</th>
               <th>角色</th>
+              <th>数据角色</th>
               <th>状态</th>
               <th>创建时间</th>
               <th>操作</th>
@@ -136,6 +140,7 @@ function changePage(p) {
             <tr v-for="item in list" :key="item.id">
               <td>{{ item.username }}</td>
               <td><span class="badge">{{ item.display_role || item.role }}</span></td>
+              <td><span class="badge">{{ item.data_role || '-' }}</span></td>
               <td><span class="badge" :class="item.disabled ? 'err' : 'ok'">{{ item.disabled ? '禁用' : '正常' }}</span></td>
               <td>{{ item.created_at }}</td>
               <td class="actions">
@@ -146,7 +151,7 @@ function changePage(p) {
               </td>
             </tr>
             <tr v-if="!list.length">
-              <td colspan="5" class="empty">暂无数据</td>
+              <td colspan="6" class="empty">暂无数据</td>
             </tr>
           </tbody>
         </table>
@@ -178,6 +183,10 @@ function changePage(p) {
           <select v-model="form.role">
             <option v-for="r in allRoles" :key="r.name" :value="r.name">{{ r.display_name || r.name }}</option>
           </select>
+        </div>
+        <div class="field">
+          <label>数据角色</label>
+          <input v-model="form.data_role" placeholder="MCP 数据角色：super_admin / region_manager / store_manager / analyst" />
         </div>
         <div class="actions">
           <button class="secondary" @click="modal = false">取消</button>

@@ -21,7 +21,7 @@ const detail = ref(null)
 function openDetail(item) {
   detail.value = {
     title: '内容 / 结果详情',
-    text: item.content || item.response || item.result || '-'
+    text: item.content || item.response || item.result || item.detail || '-'
   }
 }
 function closeDetail() {

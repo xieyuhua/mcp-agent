@@ -97,6 +97,7 @@ func main() {
 	// HTTP 服务模式下需先打开用户数据库，再将 callLogStore 注入 agent.New
 	// 使初始化阶段（MCP 连接、技能加载、预加载表结构）的活动日志能被捕获。
 	var users *userdb.Store
+	var cs agent.CallLogStore // 使用接口类型避免 typed-nil
 	if *serve {
 		var err error
 		users, err = userdb.New(*userDBPath)
@@ -104,14 +105,20 @@ func main() {
 			fmt.Fprintf(os.Stderr, "打开用户数据库失败: %v\n", err)
 			os.Exit(1)
 		}
+		cs = users
 	}
 
-	ag, err := agent.New(effCfg, users)
+	ag, err := agent.New(effCfg, cs)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "启动失败: %v\n", err)
 		os.Exit(1)
 	}
 	defer ag.Close()
+
+	// HTTP 服务模式下初始化权限解析器（Agent 侧管理数据库角色权限）。
+	if *serve && users != nil {
+		ag.InitPermissionResolver(users)
+	}
 
 	// 后台管理服务：配置的查看/修改/重置（持久化到数据库并热应用）。
 	// 仅在 HTTP 服务模式下初始化，因为需要用户数据库支持用户/角色/日志管理。

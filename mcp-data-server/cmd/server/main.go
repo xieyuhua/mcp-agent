@@ -16,13 +16,9 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
 	"company.com/mcp-data-server/config"
-	"company.com/mcp-data-server/internal/admin"
-	"company.com/mcp-data-server/internal/auth"
 	"company.com/mcp-data-server/internal/handler"
-	"company.com/mcp-data-server/internal/mask"
 	"company.com/mcp-data-server/internal/repository"
 	"company.com/mcp-data-server/internal/service"
-	"company.com/mcp-data-server/internal/web"
 
 	"github.com/gin-gonic/gin"
 )
@@ -48,31 +44,14 @@ func main() {
 		}
 	}
 
-	roleRepo := repository.NewRoleRepo(db)
-	if err := roleRepo.SeedBuiltinRoles("system"); err != nil {
-		log.Printf("warn: seed builtin roles: %v", err)
-	}
-
-	authSvc := service.NewAuthService(db, cfg.JWTSecret)
 	auditSvc := service.NewAuditService(db)
 	queryRepo := repository.NewQueryRepo(db)
 
-	permRepo := repository.NewPermissionRepo(db)
-	authz := auth.NewResolver(permRepo)
-	masker := mask.NewResolver(permRepo)
-	if err := authz.Refresh(""); err != nil {
-		log.Printf("warn: warm auth cache: %v", err)
-	}
-	if err := masker.Refresh(""); err != nil {
-		log.Printf("warn: warm mask cache: %v", err)
-	}
-
-	querySvc := service.NewQueryService(queryRepo, auditSvc, authz, masker, cfg.MaskEnabled)
-	permSvc := service.NewPermissionService(permRepo, roleRepo, authz, masker, auditSvc)
+	querySvc := service.NewQueryService(queryRepo, auditSvc)
 	webSvc := service.NewWebService(cfg.SearchProvider)
 	weatherSvc := service.NewWeatherService()
 
-	toolHandler := handler.NewToolHandler(authSvc, querySvc, permSvc, webSvc, weatherSvc, cfg.WorkDir, cfg.SandboxEnabled)
+	toolHandler := handler.NewToolHandler(querySvc, webSvc, weatherSvc, cfg.WorkDir, cfg.SandboxEnabled)
 
 	mcpServer := mcpserver.NewMCPServer(
 		"mcp-data-server",
@@ -87,7 +66,7 @@ func main() {
 
 	switch strings.ToLower(cfg.Transport) {
 	case "http":
-		if err := startHTTP(ctx, cfg, mcpServer, authSvc, permSvc, toolHandler); err != nil && ctx.Err() == nil {
+		if err := startHTTP(ctx, cfg, mcpServer, toolHandler); err != nil && ctx.Err() == nil {
 			log.Fatalf("http server: %v", err)
 		}
 	case "both":
@@ -102,7 +81,7 @@ func main() {
 		}()
 		go func() {
 			defer wg.Done()
-			if err := startHTTP(ctx, cfg, mcpServer, authSvc, permSvc, toolHandler); err != nil && ctx.Err() == nil {
+			if err := startHTTP(ctx, cfg, mcpServer, toolHandler); err != nil && ctx.Err() == nil {
 				log.Printf("http server error: %v", err)
 				cancel()
 			}
@@ -144,8 +123,8 @@ func startStdio(ctx context.Context, mcpServer *mcpserver.MCPServer) error {
 	}
 }
 
-// startHTTP 启动 HTTP 传输（MCP over streamable-http + 权限后台 + 内嵌 Web），阻塞到 ctx 取消。
-func startHTTP(ctx context.Context, cfg *config.Config, mcpServer *mcpserver.MCPServer, authSvc *service.AuthService, permSvc *service.PermissionService, toolHandler *handler.ToolHandler) error {
+// startHTTP 启动 HTTP 传输（MCP over streamable-http），阻塞到 ctx 取消。
+func startHTTP(ctx context.Context, cfg *config.Config, mcpServer *mcpserver.MCPServer, toolHandler *handler.ToolHandler) error {
 	addr := cfg.HTTPAddr
 	if addr == "" {
 		addr = ":8081"
@@ -153,17 +132,13 @@ func startHTTP(ctx context.Context, cfg *config.Config, mcpServer *mcpserver.MCP
 
 	httpSrv := mcpserver.NewStreamableHTTPServer(mcpServer,
 		mcpserver.WithEndpointPath("/mcp"),
-		mcpserver.WithStateLess(true), // llama.cpp 客户端目前不携带 Mcp-Session-Id，使用无状态模式
+		mcpserver.WithStateLess(true),
 	)
-	// SSE 服务端：标准 MCP 旧版 SSE 传输（GET /sse 建立接收流 + POST /messages 发送请求），
-	// 供 llama.cpp 等以 SSE 方式对接的 MCP 客户端连接（如 llama.cpp 的 --mcp-server sse://host:8081/sse）。
-	// 复用同一个 mcpServer 实例，工具清单与鉴权逻辑完全一致。
 	sseSrv := mcpserver.NewSSEServer(mcpServer,
 		mcpserver.WithSSEEndpoint("/sse"),
 		mcpserver.WithMessageEndpoint("/messages"),
 		mcpserver.WithSSEDisableLocalhostProtection(true),
 	)
-	adminSrv := admin.New(authSvc, permSvc)
 	llamaHandler := handler.NewLlamaToolHandler(toolHandler)
 
 	gin.SetMode(gin.ReleaseMode)
@@ -174,8 +149,6 @@ func startHTTP(ctx context.Context, cfg *config.Config, mcpServer *mcpserver.MCP
 	r.Any("/mcp", gin.WrapH(httpSrv))
 	r.Any("/sse", gin.WrapH(sseSrv))
 	r.Any("/messages", gin.WrapH(sseSrv))
-	r.Any("/api/admin/*path", gin.WrapH(adminSrv.Handler()))
-	// llama.cpp 网页兼容层：OpenAI 风格 function calling 工具列表与调用。
 	r.GET("/api/llama/tools", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"tools": llamaHandler.ListTools()})
 	})
@@ -192,8 +165,6 @@ func startHTTP(ctx context.Context, cfg *config.Config, mcpServer *mcpserver.MCP
 		}
 		c.JSON(http.StatusOK, gin.H{"result": res})
 	})
-	r.GET("/", gin.WrapH(web.StaticHandler(cfg.WebDir)))
-	r.NoRoute(gin.WrapH(web.StaticHandler(cfg.WebDir)))
 
 	srv := &http.Server{Addr: addr, Handler: r}
 
@@ -202,7 +173,7 @@ func startHTTP(ctx context.Context, cfg *config.Config, mcpServer *mcpserver.MCP
 		errCh <- srv.ListenAndServe()
 	}()
 
-	log.Printf("mcp-data-server HTTP started: http://%s  (mcp=/mcp, sse=/sse, admin=/api/admin, web=/)", normalizeAddr(addr))
+	log.Printf("mcp-data-server HTTP started: http://%s  (mcp=/mcp, sse=/sse)", normalizeAddr(addr))
 	select {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

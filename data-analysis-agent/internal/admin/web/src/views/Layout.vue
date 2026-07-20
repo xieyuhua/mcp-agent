@@ -13,18 +13,10 @@ const pwdModal = ref(false)
 const pwdForm = ref({ old_password: '', new_password: '', confirm: '' })
 const pwdError = ref('')
 const pwdSaving = ref(false)
-const themes = [
-  { value: 'dark', icon: '🌙', label: '暗色' },
-  { value: 'light', icon: '☀️', label: '亮色' },
-  { value: 'auto', icon: '🔄', label: '跟随系统' }
-]
+const dragIdx = ref(-1)
+const dropIdx = ref(-1)
 
-function changeTheme(t) {
-  theme.value = t
-  setTheme(t)
-}
-
-const menu = [
+const DEFAULT_MENU = [
   { path: '/dashboard', icon: '📊', name: 'Dashboard', label: '概览' },
   { path: '/users', icon: '👤', name: 'Users', label: '用户管理' },
   { path: '/roles', icon: '🏷️', name: 'Roles', label: '角色管理' },
@@ -33,10 +25,71 @@ const menu = [
   { path: '/config', icon: '⚙️', name: 'Config', label: '系统配置' },
   { path: '/prompts', icon: '💡', name: 'Prompts', label: '提示词管理' },
   { path: '/logs', icon: '📄', name: 'Logs', label: '日志管理' },
-  { path: '/skills', icon: '🛠️', name: 'Skills', label: '技能管理' }
+  { path: '/skills', icon: '🛠️', name: 'Skills', label: '技能管理' },
+  { path: '/sample-questions', icon: '❓', name: 'SampleQuestions', label: '示例问题' },
+  { path: '/data-permissions', icon: '🔒', name: 'DataPermissions', label: '数据权限' },
+  { path: '/field-permissions', icon: '👁️', name: 'FieldPermissions', label: '字段权限' },
+  { path: '/mask-rules', icon: '🎭', name: 'MaskRules', label: '脱敏规则' }
 ]
 
+const menu = ref([])
+
+const themes = [
+  { value: 'dark', icon: '🌙', label: '暗色' },
+  { value: 'light', icon: '☀️', label: '亮色' },
+  { value: 'auto', icon: '🔄', label: '跟随系统' }
+]
+
+function loadMenuOrder() {
+  try {
+    const saved = localStorage.getItem('admin_menu_order')
+    if (saved) {
+      const order = JSON.parse(saved)
+      menu.value = order.map(p => DEFAULT_MENU.find(m => m.path === p) || DEFAULT_MENU.find(m => m.path === p)).filter(Boolean)
+      if (menu.value.length) return
+    }
+  } catch (e) {}
+  menu.value = [...DEFAULT_MENU]
+}
+
+function saveMenuOrder() {
+  localStorage.setItem('admin_menu_order', JSON.stringify(menu.value.map(m => m.path)))
+}
+
+function onDragStart(e, idx) {
+  dragIdx.value = idx
+  e.dataTransfer.effectAllowed = 'move'
+  e.dataTransfer.setData('text/plain', String(idx))
+}
+
+function onDragOver(e, idx) {
+  e.preventDefault()
+  e.dataTransfer.dropEffect = 'move'
+  dropIdx.value = idx
+}
+
+function onDragLeave() {
+  dropIdx.value = -1
+}
+
+function onDrop(e, idx) {
+  e.preventDefault()
+  const from = dragIdx.value
+  if (from < 0 || from === idx) return
+  const item = menu.value.splice(from, 1)[0]
+  menu.value.splice(idx, 0, item)
+  dragIdx.value = -1
+  dropIdx.value = -1
+  saveMenuOrder()
+}
+
+function onDragEnd() {
+  dragIdx.value = -1
+  dropIdx.value = -1
+}
+
 onMounted(async () => {
+  loadMenuOrder()
   try {
     admin.value = await auth.me()
   } catch (e) {
@@ -51,7 +104,6 @@ async function logout() {
   router.push('/login')
 }
 
-// 右上角“修改密码”：修改当前登录管理员自己的密码。
 async function changePassword() {
   pwdError.value = ''
   if (!pwdForm.value.new_password) {
@@ -92,12 +144,19 @@ function isActive(path) {
       </div>
       <nav class="nav">
         <router-link
-          v-for="item in menu"
+          v-for="(item, idx) in menu"
           :key="item.path"
           :to="item.path"
           class="nav-item"
-          :class="{ active: isActive(item.path) }"
+          :class="{ active: isActive(item.path), 'drag-over': dropIdx === idx }"
+          draggable="true"
+          @dragstart="onDragStart($event, idx)"
+          @dragover="onDragOver($event, idx)"
+          @dragleave="onDragLeave"
+          @drop="onDrop($event, idx)"
+          @dragend="onDragEnd"
         >
+          <span class="drag-handle" title="拖动排序">⠿</span>
           <span class="icon">{{ item.icon }}</span>
           <span class="label" v-show="!collapsed">{{ item.label }}</span>
         </router-link>
@@ -205,15 +264,29 @@ function isActive(path) {
 .nav-item {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 12px 16px;
+  gap: 6px;
+  padding: 10px 16px;
   color: var(--sidebar-text);
   transition: 0.15s;
+  cursor: grab;
+}
+.nav-item:active {
+  cursor: grabbing;
 }
 .nav-item:hover,
 .nav-item.active {
   background: rgba(255, 255, 255, 0.05);
   color: var(--text);
+}
+.nav-item.drag-over {
+  border-top: 2px solid var(--primary);
+}
+.drag-handle {
+  flex: 0 0 16px;
+  font-size: 14px;
+  color: var(--muted);
+  opacity: 0.5;
+  cursor: grab;
 }
 .icon {
   flex: 0 0 24px;
