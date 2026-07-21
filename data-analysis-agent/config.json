@@ -2,9 +2,9 @@
   "llm": {
     "provider": "ollama",
     "base_url": "http://localhost:11343",
-    "model": "qwen3:8b",
+    "model": "qwen3:8b-160k",
     "temperature": 0.2,
-    "max_tokens": 2048
+    "max_tokens": 20480
   },
   "mcp": {
     "mode": "local",
