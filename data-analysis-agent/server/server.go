@@ -55,6 +55,7 @@ func (s *Server) buildRouter() *gin.Engine {
 		api.GET("/health", s.handleHealth)
 		api.POST("/ask", s.handleAsk)
 		api.GET("/ui-config", s.handleUIConfig)
+		api.GET("/models", s.handleModels)
 
 		api.POST("/register", s.handleRegister)
 		api.POST("/login", s.handleLogin)
@@ -173,10 +174,35 @@ type askRequest struct {
 	EnableChart *bool   `json:"enable_chart"` // 是否允许生成图表；nil=沿用（开启）
 	UserPrompt  string  `json:"user_prompt"`  // 用户自定义提示词；为空表示使用系统后台默认提示词
 	Mode        string  `json:"mode"`         // react | plan；为空表示沿用运行配置
+	// PlanOnly 仅生成计划不执行（plan 模式下）。
+	PlanOnly bool `json:"plan_only"`
+	// SelectedSteps 用户从计划中勾选的步骤文本列表（plan 模式确认执行时传入）。
+	SelectedSteps []string `json:"selected_steps"`
 }
 
 func (s *Server) handleHealth(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+// handleModels 返回 LLM 提供商的可用模型列表，供前端下拉选择。
+func (s *Server) handleModels(c *gin.Context) {
+	models, err := s.ag.ListModels()
+	if err != nil {
+		// 获取失败时返回当前配置的模型，保证前端至少有选项
+		info := s.ag.LLMInfo()
+		m := ""
+		if v, ok := info["model"]; ok {
+			m, _ = v.(string)
+		}
+		c.JSON(http.StatusOK, gin.H{"models": []string{m}, "current": m, "error": err.Error()})
+		return
+	}
+	info := s.ag.LLMInfo()
+	current := ""
+	if v, ok := info["model"]; ok {
+		current, _ = v.(string)
+	}
+	c.JSON(http.StatusOK, gin.H{"models": models, "current": current})
 }
 
 // handleMCPProxy 把请求同源转发到后台配置的远程 MCP 服务（mcp.base_url）。
@@ -292,7 +318,7 @@ func (s *Server) handleAsk(c *gin.Context) {
 			userPrompt = p
 		}
 	}
-	opts := buildAskOpts(req.Model, req.Temperature, req.MaxTokens, req.EnableChart, userPrompt)
+	opts := buildAskOpts(req.Model, req.Temperature, req.MaxTokens, req.EnableChart, userPrompt, req.PlanOnly, req.SelectedSteps)
 	opts.Mode = req.Mode
 	opts.UserID = user.ID
 	opts.ConversationID = conv.ID
@@ -321,12 +347,14 @@ func (s *Server) handleAsk(c *gin.Context) {
 
 // buildAskOpts 组装单次提问的可选覆盖项；始终返回非 nil 的 *agent.AskOptions，
 // 全空时返回空结构体（沿用运行配置），避免调用方在 nil 上解引用导致 panic。
-func buildAskOpts(model string, temperature float64, maxTokens int, enableChart *bool, userPrompt string) *agent.AskOptions {
+func buildAskOpts(model string, temperature float64, maxTokens int, enableChart *bool, userPrompt string, planOnly bool, selectedSteps []string) *agent.AskOptions {
 	opts := &agent.AskOptions{
-		Model:       model,
-		Temperature: temperature,
-		MaxTokens:   maxTokens,
-		UserPrompt:  userPrompt,
+		Model:          model,
+		Temperature:    temperature,
+		MaxTokens:      maxTokens,
+		UserPrompt:     userPrompt,
+		PlanOnly:       planOnly,
+		SelectedSteps:  selectedSteps,
 	}
 	if enableChart != nil {
 		v := *enableChart
@@ -416,6 +444,8 @@ func (s *Server) handleAskStream(c *gin.Context, user *userdb.User, conv *userdb
 		streamOpts.UserPrompt = opts.UserPrompt
 		streamOpts.UserID = opts.UserID
 		streamOpts.ConversationID = opts.ConversationID
+		streamOpts.PlanOnly = opts.PlanOnly
+		streamOpts.SelectedSteps = opts.SelectedSteps
 		if opts.EnableChart != nil {
 			v := *opts.EnableChart
 			streamOpts.EnableChart = &v

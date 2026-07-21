@@ -217,13 +217,28 @@
   .topbar { backdrop-filter: saturate(1.2); }
   .samples button { transition: color .15s, border-color .15s, transform .1s; }
   .samples button:active { transform: scale(.97); }
-  /* ---- 输入联想下拉 ---- */
-  .suggestions { display: none; padding: 8px 18px 6px; flex-direction: column; gap: 4px; background: var(--panel); border-top: 1px solid var(--border); max-height: 260px; overflow-y: auto; }
-  .suggestions.show { display: flex; }
-  .suggestions .sug-item { display: flex; align-items: center; gap: 8px; padding: 9px 12px; border-radius: 10px; cursor: pointer; font-size: 13px; color: var(--text-dim); transition: background .12s, color .12s; }
-  .suggestions .sug-item:hover { background: var(--panel-2); color: var(--text); }
-  .suggestions .sug-item::before { content: "💡"; font-size: 12px; opacity: .7; flex-shrink: 0; }
-  .suggestions .sug-item mark { background: rgba(79,140,255,0.25); color: var(--accent); border-radius: 2px; padding: 0 1px; }
+  .samples button mark { background: rgba(79,140,255,0.25); color: var(--accent); border-radius: 2px; padding: 0 1px; }
+  /* ---- 计划模式 UI ---- */
+  .plan-box { background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin-top: 10px; }
+  .plan-box .plan-title { font-size: 14px; font-weight: 700; color: var(--accent); margin-bottom: 10px; display: flex; align-items: center; gap: 6px; }
+  .plan-box .plan-title::before { content: "📋"; }
+  .plan-steps { display: flex; flex-direction: column; gap: 6px; }
+  .plan-step { display: flex; align-items: flex-start; gap: 10px; padding: 8px 10px; border-radius: 8px; cursor: pointer; transition: background .12s; }
+  .plan-step:hover { background: rgba(79,140,255,0.06); }
+  .plan-step input[type="checkbox"] { accent-color: var(--accent); margin-top: 3px; flex-shrink: 0; width: 16px; height: 16px; cursor: pointer; }
+  .plan-step .step-label { font-size: 13px; color: var(--text); line-height: 1.5; }
+  .plan-step .step-num { font-size: 12px; color: var(--accent); font-weight: 700; min-width: 18px; }
+  .plan-actions { display: flex; gap: 8px; margin-top: 12px; }
+  .plan-confirm { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; border: none; border-radius: 8px; padding: 8px 18px; font-size: 13px; font-weight: 600; cursor: pointer; transition: transform .1s, box-shadow .15s; }
+  .plan-confirm:hover { box-shadow: 0 4px 14px rgba(79,140,255,0.3); }
+  .plan-confirm:active { transform: scale(.97); }
+  .plan-confirm:disabled { opacity: 0.5; cursor: not-allowed; }
+  .plan-sel-all { background: var(--panel); border: 1px solid var(--border); color: var(--text-dim); border-radius: 8px; padding: 8px 14px; font-size: 13px; cursor: pointer; }
+  .plan-sel-all:hover { color: var(--text); border-color: var(--accent); }
+  .plan-progress { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-dim); margin-top: 10px; }
+  .plan-progress .prog-bar { flex: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+  .plan-progress .prog-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); border-radius: 3px; transition: width .3s ease; }
+  .plan-progress .prog-text { white-space: nowrap; font-weight: 600; color: var(--accent); }
 </style>
 </head>
 <body>
@@ -264,7 +279,7 @@
     </div>
   </main>
 
-  <div class="suggestions" id="suggestions"></div>
+  <div class="samples" id="samples"></div>
 
   <footer class="composer">
     <textarea id="input" rows="1" placeholder="输入你的数据分析问题"></textarea>
@@ -292,6 +307,14 @@
     <div class="field">
       <label>最大 Token MaxTokens</label>
       <input type="number" id="setMax" min="0" step="256" placeholder="0 = 沿用配置" />
+    </div>
+    <div class="field">
+      <label>运行模式</label>
+      <select id="setMode">
+        <option value="react">ReAct（边思考边执行）</option>
+        <option value="plan">Plan（先计划再执行）</option>
+      </select>
+      <div class="hint">Plan 模式会先生成分析计划，确认后再逐步执行。</div>
     </div>
     <div class="switch-row">
       <span class="desc">默认展开分析过程</span>
@@ -353,7 +376,7 @@
   var chatEl = document.getElementById("chat");
   var inputEl = document.getElementById("input");
   var sendBtn = document.getElementById("sendBtn");
-  var suggestionsEl = document.getElementById("suggestions");
+  var samplesEl = document.getElementById("samples");
   var statusEl = document.getElementById("status");
   var statusText = document.getElementById("statusText");
 
@@ -570,6 +593,7 @@ var loadMoreBtn = null;
   function resetChat() {
     chatEl.innerHTML = "";
     charts = [];
+    planSteps = []; planExecuted = 0; planTotal = 0; lastQuestion = "";
     if (loadMoreBtn) { loadMoreBtn.remove(); loadMoreBtn = null; }
     msgLimit = 50; msgOffset = 0; msgHasMore = false;
     // 欢迎语
@@ -617,7 +641,7 @@ var loadMoreBtn = null;
       var s = JSON.parse(localStorage.getItem(SETTINGS_KEY));
       if (s) return s;
     } catch (e) {}
-    return { model: "", temperature: 0, max_tokens: 0, showSteps: true, enableChart: true, showDuration: true, theme: "auto", auto: true };
+    return { model: "", temperature: 0, max_tokens: 0, showSteps: true, enableChart: true, showDuration: true, theme: "auto", auto: true, mode: "react" };
   }
   function saveSettings() { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); }
   function applyTheme() { document.documentElement.setAttribute("data-theme", settings.theme || "auto"); }
@@ -658,11 +682,6 @@ var loadMoreBtn = null;
     var steps = (globalUI.workflow_steps || "").split(/[→]/).map(function (s) { return s.trim(); }).filter(Boolean);
     return steps.length ? steps.join(" → ") : "用自然语言提问，我会自动生成 SQL、经 MCP 权限校验后查询数据库，并在合适时生成图表。";
   }
-
-  fetch("/api/models").then(function (r) { return r.json(); }).then(function (info) {
-    var m = document.getElementById("setModel");
-    if (!m.value && info.model) m.placeholder = "当前: " + info.model;
-  }).catch(function () {});
 
   function setOnline(on) {
     statusEl.classList.toggle("off", !on);
@@ -1037,10 +1056,20 @@ var loadMoreBtn = null;
     scrollBottom();
   }
   function addTyping() {
-    if (document.getElementById("typing")) return; // 已在思考中则避免重复
-    var row = document.createElement("div"); row.className = "row assistant"; row.id = "typing";
-    row.innerHTML = '<div class="avatar">AI</div><div class="bubble"><span class="typing"><span class="spin"></span><span class="thinking-text">思考中…</span></span></div>';
-    chatEl.appendChild(row); scrollBottom();
+    if (document.getElementById("typing")) return;
+    if (!msgRow) {
+      msgRow = document.createElement("div"); msgRow.className = "row assistant";
+      var av = document.createElement("div"); av.className = "avatar"; av.textContent = "AI";
+      msgBubble = document.createElement("div"); msgBubble.className = "bubble";
+      mdEl = document.createElement("div"); mdEl.className = "md";
+      msgBubble.appendChild(mdEl);
+      msgRow.appendChild(av); msgRow.appendChild(msgBubble);
+      chatEl.appendChild(msgRow);
+    }
+    var ty = document.createElement("span"); ty.className = "typing"; ty.id = "typing";
+    ty.innerHTML = '<span class="spin"></span><span class="thinking-text">思考中…</span>';
+    msgBubble.insertBefore(ty, mdEl);
+    scrollIfNearBottom();
   }
   function removeTyping() { var t = document.getElementById("typing"); if (t) t.remove(); }
   function addError(msg) {
@@ -1052,14 +1081,98 @@ var loadMoreBtn = null;
     chatEl.appendChild(row); scrollBottom();
   }
 
+  // ---- 计划模式 UI ----
+  function renderPlanCard(bubble) {
+    // 移除已有计划卡片（重新生成时）
+    var old = bubble.querySelector(".plan-box");
+    if (old) old.remove();
+    var box = document.createElement("div"); box.className = "plan-box";
+    var title = document.createElement("div"); title.className = "plan-title";
+    title.textContent = "分析计划（" + planSteps.length + " 步，请勾选要执行的步骤）";
+    box.appendChild(title);
+    var list = document.createElement("div"); list.className = "plan-steps";
+    planSteps.forEach(function (step, i) {
+      var item = document.createElement("label"); item.className = "plan-step";
+      var cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = true; cb.dataset.idx = i;
+      var num = document.createElement("span"); num.className = "step-num"; num.textContent = (i + 1) + ".";
+      var lbl = document.createElement("span"); lbl.className = "step-label"; lbl.textContent = step;
+      item.appendChild(cb); item.appendChild(num); item.appendChild(lbl);
+      list.appendChild(item);
+    });
+    box.appendChild(list);
+    var actions = document.createElement("div"); actions.className = "plan-actions";
+    var selAll = document.createElement("button"); selAll.className = "plan-sel-all"; selAll.textContent = "全选/反选";
+    selAll.onclick = function () {
+      var cbs = list.querySelectorAll("input[type=checkbox]");
+      var allChecked = true;
+      cbs.forEach(function (cb) { if (!cb.checked) allChecked = false; });
+      cbs.forEach(function (cb) { cb.checked = !allChecked; });
+    };
+    var confirm = document.createElement("button"); confirm.className = "plan-confirm"; confirm.textContent = "确认执行";
+    confirm.onclick = function () {
+      var selected = [];
+      list.querySelectorAll("input[type=checkbox]:checked").forEach(function (cb) {
+        var idx = parseInt(cb.dataset.idx, 10);
+        if (planSteps[idx]) selected.push(planSteps[idx]);
+      });
+      if (!selected.length) { alert("请至少勾选一个步骤"); return; }
+      // 隐藏计划卡片，开始执行
+      box.remove();
+      planExecuted = 0; planTotal = selected.length;
+      renderPlanProgress(msgBubble);
+      send({ _selectedSteps: selected });
+    };
+    actions.appendChild(selAll); actions.appendChild(confirm);
+    box.appendChild(actions);
+    bubble.appendChild(box);
+    scrollIfNearBottom();
+  }
+  function renderPlanProgress(bubble) {
+    var old = bubble.querySelector(".plan-progress");
+    if (old) old.remove();
+    var prog = document.createElement("div"); prog.className = "plan-progress"; prog.id = "planProg";
+    var bar = document.createElement("div"); bar.className = "prog-bar";
+    var fill = document.createElement("div"); fill.className = "prog-fill"; fill.style.width = "0%";
+    bar.appendChild(fill);
+    var text = document.createElement("span"); text.className = "prog-text"; text.textContent = "0/" + planTotal;
+    prog.appendChild(bar); prog.appendChild(text);
+    bubble.appendChild(prog);
+    scrollIfNearBottom();
+  }
+  function updatePlanProgress() {
+    var prog = document.getElementById("planProg");
+    if (!prog) return;
+    var fill = prog.querySelector(".prog-fill");
+    var text = prog.querySelector(".prog-text");
+    if (fill) fill.style.width = Math.round((planExecuted / planTotal) * 100) + "%";
+    if (text) text.textContent = planExecuted + "/" + planTotal;
+    scrollIfNearBottom();
+  }
+
   var loading = false;
   var controller = null;
   var pendingStep = null;   // 当前"调用中"的步骤卡片（step_start 创建，step 完成时更新）
+  var planMode = false;     // 当前是否 plan 模式
+  var planSteps = [];       // 当前计划步骤列表
+  var planExecuted = 0;     // 已执行的计划步数
+  var planTotal = 0;        // 计划总步数
+  var lastQuestion = "";    // 上一次发送的原始问题（plan 确认时复用）
+  var msgRow = null;        // 当前助手消息容器（分析过程 + 回答同属一条）
+  var msgBubble = null;     // 消息气泡（步骤插入到回答之前）
+  var mdEl = null;          // 回答区 .md
   function send(text) {
-    var q = (text != null ? text : inputEl.value).trim();
+    var isPlanConfirm = text && typeof text === "object" && text._selectedSteps;
+    var q;
+    if (isPlanConfirm) {
+      q = lastQuestion; // 复用原始问题
+    } else {
+      q = (text != null ? text : inputEl.value).trim();
+      if (q) lastQuestion = q; // 记住原始问题
+    }
     if (!q) return;
     if (loading) { stopGen(); return; }   // 生成中再次点击 = 停止
     if (!token) { showAuth(true); return; }
+    msgRow = null; msgBubble = null; mdEl = null;
     inputEl.value = ""; autoGrow();
     hideSuggestions();
     addUser(q);
@@ -1073,6 +1186,16 @@ var loadMoreBtn = null;
     if (settings.max_tokens > 0) body.max_tokens = settings.max_tokens;
     if (settings.enableChart === false) body.enable_chart = false; // 关闭图表输出时显式告知后端
     if (userPrompt) body.user_prompt = userPrompt; // 携带用户自定义提示词
+    // Plan 模式：首次发送 plan_only，用户确认后发送 selected_steps
+    if (planMode) {
+      if (text && text._selectedSteps) {
+        body.selected_steps = text._selectedSteps;
+        body.mode = "plan";
+      } else {
+        body.plan_only = true;
+        body.mode = "plan";
+      }
+    }
 
     // 流式请求：边处理边渲染，避免长任务下页面假死、回答被截断。
     fetch("/api/ask", {
@@ -1089,14 +1212,11 @@ var loadMoreBtn = null;
       var reader = r.body.getReader();
       var decoder = new TextDecoder("utf-8");
       var buf = "";
-      var msgRow = null;        // 当前助手消息容器（分析过程 + 回答同属一条）
-      var msgBubble = null;     // 消息气泡（步骤插入到回答之前）
-      var mdEl = null;          // 回答区 .md
-      var stepsBody = null;     // 分析过程折叠区
-      var stepsBtn = null;      // 分析过程折叠按钮
+      pendingStep = null;       // 每次新请求重置"调用中"卡片
+      var stepsBody = null;
+      var stepsBtn = null;
       var stepsCount = 0;
       var convId = null;
-      pendingStep = null;       // 每次新请求重置"调用中"卡片
       var mdText = "";          // 当前回答累计文本（流式增量渲染用）
       var renderPending = false;
 
@@ -1153,13 +1273,21 @@ var loadMoreBtn = null;
               localStorage.setItem(CONV_KEY, convId);
               loadConversations();
             }
+          } else if (ev.kind === "plan") {
+            // 计划模式：收到计划步骤列表，渲染可勾选的步骤卡片。
+            removeTyping();
+            ensureMsg();
+            planSteps = ev.plan || [];
+            planExecuted = 0;
+            planTotal = planSteps.length;
+            renderPlanCard(msgBubble);
+            scrollIfNearBottom();
           } else if (ev.kind === "thinking") {
             // LLM 正在思考：保持“思考中”指示，避免像卡死；
             // 若已被真实事件清掉，则重新显示（多轮/多次思考场景）。
             addTyping();
           } else if (ev.kind === "step_start") {
             // 工具调用开始：展示"调用中"卡片（含 spinner），持续显示直到对应 step 完成，避免执行期间像卡死。
-            removeTyping();   // 首个真实事件到达，移除"思考中"
             ensureSteps();
             stepsCount++;
             var ps = document.createElement("div"); ps.className = "step pending";
@@ -1186,7 +1314,6 @@ var loadMoreBtn = null;
             }
           } else if (ev.kind === "step_result_delta") {
             // 工具结果流式片段：逐步把结果文字拼到"调用中"卡片里，像打字机一样。
-            removeTyping();
             if (pendingStep) {
               var rr = pendingStep.querySelector(".step-result-delta");
               if (!rr) {
@@ -1198,8 +1325,12 @@ var loadMoreBtn = null;
               scrollIfNearBottom();
             }
           } else if (ev.kind === "step") {
-            removeTyping();   // 首个真实事件到达，移除"思考中"
             ensureSteps();
+            // Plan 模式进度追踪
+            if (planMode && planTotal > 0) {
+              planExecuted++;
+              updatePlanProgress();
+            }
             var st;
             var rr;
             if (pendingStep) {
@@ -1328,39 +1459,32 @@ var loadMoreBtn = null;
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
   });
 
-  // ---- 示例问题联想 ----
+  // ---- 示例问题按钮 ----
   function showSuggestions(query) {
     var q = (query || "").trim().toLowerCase();
     var list = sampleQuestions;
     if (q) {
-      // 按关键词匹配，优先包含匹配，再按出现位置排序
       list = sampleQuestions.filter(function (s) { return s.toLowerCase().indexOf(q) !== -1; })
         .sort(function (a, b) { return a.toLowerCase().indexOf(q) - b.toLowerCase().indexOf(q); });
     }
-    list = list.slice(0, 5); // 最多展示 5 条
-    if (!list.length) { hideSuggestions(); return; }
-    suggestionsEl.innerHTML = "";
+    list = list.slice(0, 5);
+    if (!list.length) { samplesEl.innerHTML = ""; samplesEl.style.display = "none"; return; }
+    samplesEl.innerHTML = "";
     list.forEach(function (text) {
-      var item = document.createElement("div");
-      item.className = "sug-item";
+      var btn = document.createElement("button");
+      btn.type = "button";
       if (q) {
-        // 高亮匹配部分
         var idx = text.toLowerCase().indexOf(q);
-        item.innerHTML = escapeHtml(text.substring(0, idx)) + "<mark>" + escapeHtml(text.substring(idx, idx + q.length)) + "</mark>" + escapeHtml(text.substring(idx + q.length));
+        btn.innerHTML = escapeHtml(text.substring(0, idx)) + "<mark>" + escapeHtml(text.substring(idx, idx + q.length)) + "</mark>" + escapeHtml(text.substring(idx + q.length));
       } else {
-        item.textContent = text;
+        btn.textContent = text;
       }
-      item.addEventListener("mousedown", function (e) {
-        e.preventDefault(); // 避免 blur 触发
-        inputEl.value = text;
-        autoGrow();
-        send(text);
-      });
-      suggestionsEl.appendChild(item);
+      btn.addEventListener("click", function () { send(text); });
+      samplesEl.appendChild(btn);
     });
-    suggestionsEl.classList.add("show");
+    samplesEl.style.display = "";
   }
-  function hideSuggestions() { suggestionsEl.classList.remove("show"); }
+  function hideSuggestions() { samplesEl.innerHTML = ""; samplesEl.style.display = "none"; }
 
   var overlay = document.getElementById("overlay");
   var drawer = document.getElementById("drawer");
@@ -1374,6 +1498,7 @@ var loadMoreBtn = null;
   var elTheme = document.getElementById("setTheme");
   var elAuto = document.getElementById("setAuto");
   var elPrompt = document.getElementById("setPrompt");
+  var elMode = document.getElementById("setMode");
 
   function syncSettingsToUI() {
     elModel.value = settings.model || "";
@@ -1386,6 +1511,8 @@ var loadMoreBtn = null;
     elTheme.value = settings.theme || "auto";
     elAuto.checked = settings.auto !== false;
     elPrompt.value = userPrompt || "";
+    elMode.value = settings.mode || "react";
+    planMode = elMode.value === "plan";
   }
   function openDrawer() { overlay.classList.add("show"); drawer.classList.add("show"); }
   function closeDrawer() { overlay.classList.remove("show"); drawer.classList.remove("show"); }
@@ -1401,13 +1528,16 @@ var loadMoreBtn = null;
     settings.showDuration = elDuration.checked;
     settings.theme = elTheme.value || "auto";
     settings.auto = elAuto.checked;
+    settings.mode = elMode.value || "react";
+    planMode = settings.mode === "plan";
     userPrompt = elPrompt.value.trim();
     saveSettings(); applyTheme(); closeDrawer();
     // 保存用户提示词到后端（静默失败）
     api("/api/me/prompt", { method: "POST", body: { prompt: userPrompt } }).catch(function () {});
   };
   document.getElementById("resetSettings").onclick = function () {
-    settings = { model: "", temperature: 0, max_tokens: 0, showSteps: true, enableChart: true, showDuration: true, theme: "auto", auto: true };
+    settings = { model: "", temperature: 0, max_tokens: 0, showSteps: true, enableChart: true, showDuration: true, theme: "auto", auto: true, mode: "react" };
+    planMode = false;
     saveSettings(); syncSettingsToUI(); applyTheme();
   };
   elTemp.oninput = function () { elTempVal.textContent = parseFloat(elTemp.value).toFixed(2); };

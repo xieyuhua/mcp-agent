@@ -2,7 +2,6 @@ main.exe
 *.db
 config.json
 logs/
-internal/webui/dist/
 internal/webui/node_modules/
 internal/admin/web/dist/
 internal/admin/web/node_modules/

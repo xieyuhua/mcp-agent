@@ -799,3 +799,59 @@ func (c *Client) post(path string, body interface{}, out interface{}) error {
 	}
 	return nil
 }
+
+// ListModels 获取可用模型列表。Ollama 返回 /api/tags，OpenAI 返回 /v1/models。
+func (c *Client) ListModels() ([]string, error) {
+	var path string
+	if c.provider == "ollama" {
+		path = "/api/tags"
+	} else {
+		path = "/v1/models"
+	}
+	req, err := http.NewRequest(http.MethodGet, c.baseURL+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("http %d", resp.StatusCode)
+	}
+	var names []string
+	if c.provider == "ollama" {
+		var out struct {
+			Models []struct {
+				Name string `json:"name"`
+			} `json:"models"`
+		}
+		if err := json.Unmarshal(data, &out); err != nil {
+			return nil, err
+		}
+		for _, m := range out.Models {
+			names = append(names, m.Name)
+		}
+	} else {
+		var out struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(data, &out); err != nil {
+			return nil, err
+		}
+		for _, m := range out.Data {
+			names = append(names, m.ID)
+		}
+	}
+	return names, nil
+}

@@ -1016,6 +1016,11 @@ type AskOptions struct {
 	EnableChart *bool   `json:"enable_chart"` // 是否允许模型生成图表；nil=沿用（开启），false=关闭
 	UserPrompt  string  `json:"user_prompt"`  // 用户自定义提示词追加；为空表示仅使用系统提示词
 	Mode        string  `json:"mode"`         // 覆盖运行模式：react | plan；为空表示沿用运行配置
+	// PlanOnly 仅生成计划不执行：为 true 时生成计划后 emit EventPlan + EventDone 并停止，不进入 ReAct 循环。
+	PlanOnly bool `json:"plan_only"`
+	// SelectedSteps 用户从计划中勾选的步骤文本列表（仅 plan 模式下有效）。
+	// 非空时跳过计划生成，直接用这些步骤作为执行上下文运行 ReAct 循环。
+	SelectedSteps []string `json:"selected_steps"`
 	// UserID 当前用户 ID，用于写入调用日志。
 	UserID string `json:"-"`
 	// ConversationID 当前会话 ID，用于写入调用日志。
@@ -1110,6 +1115,12 @@ func (a *Agent) LLMInfo() map[string]interface{} {
 		"temperature": a.cfg.LLM.Temperature,
 		"max_tokens":  a.cfg.LLM.MaxTokens,
 	}
+}
+
+// ListModels 从 LLM 提供商获取可用模型列表。
+func (a *Agent) ListModels() ([]string, error) {
+	cli := llm.NewClient(a.cfg.LLM.Provider, a.cfg.LLM.BaseURL, a.cfg.LLM.Model, a.cfg.LLM.APIKey, 0, 0)
+	return cli.ListModels()
 }
 
 // UIConfig 返回当前生效的前端展示开关配置（后台可热更新）。
@@ -1340,20 +1351,47 @@ func (a *Agent) AskRichWithHistory(history []HistoryItem, question string, opts 
 		agentMode = opts.Mode
 	}
 	if agentMode == "plan" {
-		planMsgs := []llm.Message{
-			{Role: "system", Content: system + "\n\n请先制定一个详细的分析计划，列出3-5个具体步骤。\n仅输出计划，不要执行工具。"},
-			{Role: "user", Content: question},
-		}
-		planResp, err := llmClient.Chat(planMsgs, nil)
-		if err == nil && planResp != nil {
-			planText := strings.TrimSpace(planResp.Content)
-			planSteps := a.parsePlan(planText)
+		// 用户已确认计划（带 selected_steps）：跳过计划生成，直接用选中步骤作为执行上下文。
+		if opts != nil && len(opts.SelectedSteps) > 0 {
+			var planText string
+			for i, s := range opts.SelectedSteps {
+				planText += fmt.Sprintf("%d. %s\n", i+1, s)
+			}
+			planSteps := opts.SelectedSteps
 			onEvent(StreamEvent{Kind: EventPlan, Plan: planSteps})
-			// 将计划和执行指令注入消息上下文
 			messages = append(messages, llm.Message{Role: "assistant", Content: "## 分析计划\n\n" + planText})
 			messages = append(messages, llm.Message{Role: "user", Content: "请按照以上计划逐步执行。每完成一步，用工具获取数据后再进行下一步。所有步骤完成后给出最终分析结论。"})
+		} else {
+			// 生成计划：使用自定义提示词或默认提示词。
+			planSuffix := a.cfg.Agent.PlanPrompt
+			if planSuffix == "" {
+				planSuffix = "请先制定一个详细的分析计划，列出3-5个具体步骤。\n仅输出计划，不要执行工具。"
+			}
+			planMsgs := []llm.Message{
+				{Role: "system", Content: system + "\n\n" + planSuffix},
+				{Role: "user", Content: question},
+			}
+			planResp, err := llmClient.Chat(planMsgs, nil)
+			if err == nil && planResp != nil {
+				planText := strings.TrimSpace(planResp.Content)
+				planSteps := a.parsePlan(planText)
+				onEvent(StreamEvent{Kind: EventPlan, Plan: planSteps})
+
+				// plan_only 模式：仅生成计划，不执行，返回。
+				if opts != nil && opts.PlanOnly {
+					result.Answer = planText
+					onEvent(StreamEvent{Kind: EventAnswer, Text: planText})
+					onEvent(StreamEvent{Kind: EventResult, Result: result})
+					onEvent(StreamEvent{Kind: EventDone})
+					return result, nil
+				}
+
+				// plan_auto_execute 或默认：将计划注入上下文并继续执行。
+				messages = append(messages, llm.Message{Role: "assistant", Content: "## 分析计划\n\n" + planText})
+				messages = append(messages, llm.Message{Role: "user", Content: "请按照以上计划逐步执行。每完成一步，用工具获取数据后再进行下一步。所有步骤完成后给出最终分析结论。"})
+			}
+			// 即使 plan 生成失败也继续 ReAct 循环（退化到普通模式）
 		}
-		// 即使 plan 生成失败也继续 ReAct 循环（退化到普通模式）
 	}
 
 	for step := 0; step < a.cfg.Agent.MaxSteps; step++ {

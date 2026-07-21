@@ -207,6 +207,12 @@ type AgentConfig struct {
 	// AutoSkillMaxKeep 自动生成的 skill 文件最多保留多少个，超出则删除最旧的。
 	// 仅在 conversation_compress_turns > 0 时生效。0 表示不限制。
 	AutoSkillMaxKeep int `json:"auto_skill_max_keep"`
+	// PlanPrompt 计划模式下生成计划的提示词后缀（追加到系统提示词之后）。
+	// 为空则使用默认提示："请先制定一个详细的分析计划，列出3-5个具体步骤。\n仅输出计划，不要执行工具。"
+	PlanPrompt string `json:"plan_prompt"`
+	// PlanAutoExecute 计划模式下是否跳过用户确认直接执行全部步骤。
+	// false（默认）= 生成计划后暂停，等用户勾选步骤并确认后执行；true = 生成后直接执行。
+	PlanAutoExecute bool `json:"plan_auto_execute"`
 }
 
 // Load 加载配置：文件 + 环境变量覆盖（CONFIG_FILE）。

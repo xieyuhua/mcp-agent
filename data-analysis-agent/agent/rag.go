@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -117,7 +118,13 @@ func loadDir(dir string, chunkSize int) ([]*Chunk, error) {
 	return chunks, nil
 }
 
-func loadFile(path string, chunkSize int) ([]*Chunk, error) {
+func loadFile(path string, chunkSize int) (cc []*Chunk, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			cc = nil
+			err = fmt.Errorf("panic in chunkText: %v", r)
+		}
+	}()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -137,16 +144,19 @@ func chunkText(text string, meta map[string]string, size int) []*Chunk {
 	}
 	var chunks []*Chunk
 	runes := []rune(text)
-	for i := 0; i < len(runes); i += size {
+	n := len(runes)
+	for i := 0; i < n; i += size {
 		end := i + size
-		if end > len(runes) {
-			end = len(runes)
+		if end > n {
+			end = n
 		}
-		// try to break at newline for cleaner chunks
 		seg := string(runes[i:end])
-		if end < len(runes) && runes[end-1] != '\n' {
+		if end < n && runes[end-1] != '\n' {
 			if newlineIdx := strings.LastIndex(seg, "\n"); newlineIdx > size/2 {
 				end = i + newlineIdx + 1
+				if end > n {
+					end = n
+				}
 				seg = string(runes[i:end])
 			}
 		}

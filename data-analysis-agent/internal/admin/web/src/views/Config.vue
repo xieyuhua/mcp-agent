@@ -79,6 +79,8 @@ const META = {
   'agent.memory_recent_keep': { label: '保留最近原文(条)', type: 'number' },
   'agent.conversation_compress_turns': { label: '对话压缩轮次(0=关闭)', type: 'number', desc: '对话轮次达到该值时自动压缩为 skill，供后续 agent 通过 use_skill 自主复用' },
   'agent.auto_skill_max_keep': { label: '自动 skill 保留数(0=不限制)', type: 'number', desc: '自动生成的 skill 文件最多保留多少个，超出则删除最旧的' },
+  'agent.plan_prompt': { label: '计划生成提示词', type: 'textarea', placeholder: '留空使用默认提示词', desc: 'Plan 模式下生成分析计划时追加到系统提示词后的指令，为空则使用内置默认值' },
+  'agent.plan_auto_execute': { label: '计划自动执行', type: 'bool', desc: 'Plan 模式下生成计划后是否跳过用户确认直接执行全部步骤' },
   'log.save_to_file': { label: '日志落盘', type: 'bool' },
   'log.dir': { label: '日志目录', type: 'text' },
   'prompts.builtin': { label: '内置场景提示词', type: 'textarea' },
