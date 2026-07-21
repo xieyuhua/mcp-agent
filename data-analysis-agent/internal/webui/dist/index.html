@@ -219,22 +219,32 @@
   .samples button:active { transform: scale(.97); }
   .samples button mark { background: rgba(79,140,255,0.25); color: var(--accent); border-radius: 2px; padding: 0 1px; }
   /* ---- 计划模式 UI ---- */
-  .plan-box { background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin-top: 10px; }
-  .plan-box .plan-title { font-size: 14px; font-weight: 700; color: var(--accent); margin-bottom: 10px; display: flex; align-items: center; gap: 6px; }
-  .plan-box .plan-title::before { content: "📋"; }
-  .plan-steps { display: flex; flex-direction: column; gap: 6px; }
-  .plan-step { display: flex; align-items: flex-start; gap: 10px; padding: 8px 10px; border-radius: 8px; cursor: pointer; transition: background .12s; }
-  .plan-step:hover { background: rgba(79,140,255,0.06); }
-  .plan-step input[type="checkbox"] { accent-color: var(--accent); margin-top: 3px; flex-shrink: 0; width: 16px; height: 16px; cursor: pointer; }
-  .plan-step .step-label { font-size: 13px; color: var(--text); line-height: 1.5; }
-  .plan-step .step-num { font-size: 12px; color: var(--accent); font-weight: 700; min-width: 18px; }
-  .plan-actions { display: flex; gap: 8px; margin-top: 12px; }
-  .plan-confirm { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; border: none; border-radius: 8px; padding: 8px 18px; font-size: 13px; font-weight: 600; cursor: pointer; transition: transform .1s, box-shadow .15s; }
-  .plan-confirm:hover { box-shadow: 0 4px 14px rgba(79,140,255,0.3); }
-  .plan-confirm:active { transform: scale(.97); }
-  .plan-confirm:disabled { opacity: 0.5; cursor: not-allowed; }
-  .plan-sel-all { background: var(--panel); border: 1px solid var(--border); color: var(--text-dim); border-radius: 8px; padding: 8px 14px; font-size: 13px; cursor: pointer; }
-  .plan-sel-all:hover { color: var(--text); border-color: var(--accent); }
+  .plan-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: none; align-items: center; justify-content: center; z-index: 60; padding: 20px; }
+  .plan-overlay.show { display: flex; }
+  .plan-modal { width: 520px; max-width: 100%; max-height: 85vh; background: var(--panel); border: 1px solid var(--border); border-radius: 16px; display: flex; flex-direction: column; box-shadow: 0 20px 60px rgba(0,0,0,0.4); }
+  .plan-modal .pm-head { padding: 18px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+  .plan-modal .pm-head h3 { margin: 0; font-size: 16px; font-weight: 700; color: var(--accent); display: flex; align-items: center; gap: 8px; }
+  .plan-modal .pm-head h3::before { content: "📋"; }
+  .plan-modal .pm-head .pm-close { background: none; border: none; color: var(--text-dim); font-size: 20px; cursor: pointer; padding: 4px 8px; border-radius: 6px; }
+  .plan-modal .pm-head .pm-close:hover { background: var(--panel-2); color: var(--text); }
+  .plan-modal .pm-body { padding: 16px 20px; overflow-y: auto; flex: 1; }
+  .plan-modal .pm-mode { display: flex; gap: 8px; margin-bottom: 14px; }
+  .plan-modal .pm-mode-btn { flex: 1; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel-2); color: var(--text-dim); font-size: 13px; font-weight: 600; cursor: pointer; text-align: center; transition: all .15s; }
+  .plan-modal .pm-mode-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .plan-modal .pm-mode-btn:hover:not(.active) { border-color: var(--accent); color: var(--text); }
+  .plan-modal .pm-steps { display: flex; flex-direction: column; gap: 4px; }
+  .plan-modal .pm-step { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border-radius: 8px; cursor: pointer; transition: background .12s; border: 1px solid transparent; }
+  .plan-modal .pm-step:hover { background: rgba(79,140,255,0.06); }
+  .plan-modal .pm-step input { accent-color: var(--accent); margin-top: 3px; flex-shrink: 0; width: 16px; height: 16px; cursor: pointer; }
+  .plan-modal .pm-step .pm-step-num { font-size: 12px; color: var(--accent); font-weight: 700; min-width: 18px; }
+  .plan-modal .pm-step .pm-step-label { font-size: 13px; color: var(--text); line-height: 1.5; flex: 1; }
+  .plan-modal .pm-foot { padding: 14px 20px; border-top: 1px solid var(--border); display: flex; gap: 10px; justify-content: flex-end; }
+  .plan-modal .pm-foot .pm-sel-all { background: var(--panel-2); border: 1px solid var(--border); color: var(--text-dim); border-radius: 8px; padding: 9px 16px; font-size: 13px; cursor: pointer; }
+  .plan-modal .pm-foot .pm-sel-all:hover { color: var(--text); border-color: var(--accent); }
+  .plan-modal .pm-foot .pm-submit { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; border: none; border-radius: 8px; padding: 9px 22px; font-size: 13px; font-weight: 600; cursor: pointer; transition: transform .1s, box-shadow .15s; }
+  .plan-modal .pm-foot .pm-submit:hover { box-shadow: 0 4px 14px rgba(79,140,255,0.3); }
+  .plan-modal .pm-foot .pm-submit:active { transform: scale(.97); }
+  .plan-modal .pm-foot .pm-submit:disabled { opacity: 0.5; cursor: not-allowed; }
   .plan-progress { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-dim); margin-top: 10px; }
   .plan-progress .prog-bar { flex: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
   .plan-progress .prog-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); border-radius: 3px; transition: width .3s ease; }
@@ -367,6 +377,27 @@
     <button class="primary" id="authSubmit">登录</button>
     <div class="err" id="authErr"></div>
     <div class="switch-line" id="authSwitch">还没有账号？<a id="authToggle">立即注册</a></div>
+  </div>
+</div>
+
+<!-- 计划模式弹框 -->
+<div class="plan-overlay" id="planOverlay">
+  <div class="plan-modal">
+    <div class="pm-head">
+      <h3 id="planModalTitle">分析计划</h3>
+      <button class="pm-close" id="planModalClose">&times;</button>
+    </div>
+    <div class="pm-body">
+      <div class="pm-mode">
+        <button class="pm-mode-btn active" id="planModeMulti">☑ 多选（可勾选多个步骤）</button>
+        <button class="pm-mode-btn" id="planModeSingle">◉ 单选（仅执行一个步骤）</button>
+      </div>
+      <div class="pm-steps" id="planModalSteps"></div>
+    </div>
+    <div class="pm-foot">
+      <button class="pm-sel-all" id="planModalSelAll">全选/反选</button>
+      <button class="pm-submit" id="planModalSubmit">确认执行</button>
+    </div>
   </div>
 </div>
 
@@ -1082,50 +1113,46 @@ var loadMoreBtn = null;
   }
 
   // ---- 计划模式 UI ----
+  var planModalMulti = true; // true=多选 checkbox, false=单选 radio
+
   function renderPlanCard(bubble) {
-    // 移除已有计划卡片（重新生成时）
-    var old = bubble.querySelector(".plan-box");
-    if (old) old.remove();
-    var box = document.createElement("div"); box.className = "plan-box";
-    var title = document.createElement("div"); title.className = "plan-title";
-    title.textContent = "分析计划（" + planSteps.length + " 步，请勾选要执行的步骤）";
-    box.appendChild(title);
-    var list = document.createElement("div"); list.className = "plan-steps";
+    var overlay = document.getElementById("planOverlay");
+    var stepsContainer = document.getElementById("planModalSteps");
+    var titleEl = document.getElementById("planModalTitle");
+    titleEl.textContent = "分析计划（" + planSteps.length + " 步，请选择要执行的步骤）";
+    stepsContainer.innerHTML = "";
+    planModalMulti = true;
+    updatePlanModeBtns();
+
     planSteps.forEach(function (step, i) {
-      var item = document.createElement("label"); item.className = "plan-step";
-      var cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = true; cb.dataset.idx = i;
-      var num = document.createElement("span"); num.className = "step-num"; num.textContent = (i + 1) + ".";
-      var lbl = document.createElement("span"); lbl.className = "step-label"; lbl.textContent = step;
-      item.appendChild(cb); item.appendChild(num); item.appendChild(lbl);
-      list.appendChild(item);
+      var item = document.createElement("label"); item.className = "pm-step";
+      var inp = document.createElement("input"); inp.type = "checkbox"; inp.checked = true; inp.dataset.idx = i;
+      var num = document.createElement("span"); num.className = "pm-step-num"; num.textContent = (i + 1) + ".";
+      var lbl = document.createElement("span"); lbl.className = "pm-step-label"; lbl.textContent = step;
+      item.appendChild(inp); item.appendChild(num); item.appendChild(lbl);
+      item.onclick = function (e) {
+        if (e.target === inp) return;
+        if (!planModalMulti) {
+          inp.checked = true;
+        } else {
+          inp.checked = !inp.checked;
+        }
+      };
+      stepsContainer.appendChild(item);
     });
-    box.appendChild(list);
-    var actions = document.createElement("div"); actions.className = "plan-actions";
-    var selAll = document.createElement("button"); selAll.className = "plan-sel-all"; selAll.textContent = "全选/反选";
-    selAll.onclick = function () {
-      var cbs = list.querySelectorAll("input[type=checkbox]");
-      var allChecked = true;
-      cbs.forEach(function (cb) { if (!cb.checked) allChecked = false; });
-      cbs.forEach(function (cb) { cb.checked = !allChecked; });
-    };
-    var confirm = document.createElement("button"); confirm.className = "plan-confirm"; confirm.textContent = "确认执行";
-    confirm.onclick = function () {
-      var selected = [];
-      list.querySelectorAll("input[type=checkbox]:checked").forEach(function (cb) {
-        var idx = parseInt(cb.dataset.idx, 10);
-        if (planSteps[idx]) selected.push(planSteps[idx]);
-      });
-      if (!selected.length) { alert("请至少勾选一个步骤"); return; }
-      // 隐藏计划卡片，开始执行
-      box.remove();
-      planExecuted = 0; planTotal = selected.length;
-      renderPlanProgress(msgBubble);
-      send({ _selectedSteps: selected });
-    };
-    actions.appendChild(selAll); actions.appendChild(confirm);
-    box.appendChild(actions);
-    bubble.appendChild(box);
-    scrollIfNearBottom();
+    overlay.classList.add("show");
+  }
+
+  function updatePlanModeBtns() {
+    document.getElementById("planModeMulti").className = "pm-mode-btn" + (planModalMulti ? " active" : "");
+    document.getElementById("planModeSingle").className = "pm-mode-btn" + (!planModalMulti ? " active" : "");
+    var stepsContainer = document.getElementById("planModalSteps");
+    var inputs = stepsContainer.querySelectorAll("input");
+    inputs.forEach(function (inp) {
+      inp.type = planModalMulti ? "checkbox" : "radio";
+      inp.name = planModalMulti ? "" : "planRadio";
+      if (!planModalMulti) inp.checked = false;
+    });
   }
   function renderPlanProgress(bubble) {
     var old = bubble.querySelector(".plan-progress");
@@ -1172,6 +1199,7 @@ var loadMoreBtn = null;
     if (!q) return;
     if (loading) { stopGen(); return; }   // 生成中再次点击 = 停止
     if (!token) { showAuth(true); return; }
+    removeTyping();  // 清理上一次残留的"思考中"
     msgRow = null; msgBubble = null; mdEl = null;
     inputEl.value = ""; autoGrow();
     hideSuggestions();
@@ -1274,12 +1302,13 @@ var loadMoreBtn = null;
               loadConversations();
             }
           } else if (ev.kind === "plan") {
-            // 计划模式：收到计划步骤列表，渲染可勾选的步骤卡片。
+            // 计划模式：收到计划步骤列表，弹出选择弹框。
             removeTyping();
             ensureMsg();
             planSteps = ev.plan || [];
             planExecuted = 0;
             planTotal = planSteps.length;
+            if (mdEl) mdEl.innerHTML = "<p>已生成分析计划，共 <strong>" + planSteps.length + "</strong> 步，请在弹框中选择要执行的步骤。</p>";
             renderPlanCard(msgBubble);
             scrollIfNearBottom();
           } else if (ev.kind === "thinking") {
@@ -1452,6 +1481,41 @@ var loadMoreBtn = null;
   }
 
   sendBtn.onclick = function () { send(); };
+
+  // ---- 计划弹框事件 ----
+  document.getElementById("planModalClose").onclick = function () {
+    document.getElementById("planOverlay").classList.remove("show");
+  };
+  document.getElementById("planOverlay").onclick = function (e) {
+    if (e.target === this) this.classList.remove("show");
+  };
+  document.getElementById("planModeMulti").onclick = function () {
+    planModalMulti = true; updatePlanModeBtns();
+  };
+  document.getElementById("planModeSingle").onclick = function () {
+    planModalMulti = false; updatePlanModeBtns();
+  };
+  document.getElementById("planModalSelAll").onclick = function () {
+    var inputs = document.getElementById("planModalSteps").querySelectorAll("input");
+    if (!planModalMulti) return; // 单选模式不支持全选
+    var allChecked = true;
+    inputs.forEach(function (inp) { if (!inp.checked) allChecked = false; });
+    inputs.forEach(function (inp) { inp.checked = !allChecked; });
+  };
+  document.getElementById("planModalSubmit").onclick = function () {
+    var container = document.getElementById("planModalSteps");
+    var selected = [];
+    container.querySelectorAll("input:checked").forEach(function (inp) {
+      var idx = parseInt(inp.dataset.idx, 10);
+      if (planSteps[idx]) selected.push(planSteps[idx]);
+    });
+    if (!selected.length) { alert("请至少选择一个步骤"); return; }
+    document.getElementById("planOverlay").classList.remove("show");
+    planExecuted = 0; planTotal = selected.length;
+    renderPlanProgress(msgBubble);
+    send({ _selectedSteps: selected });
+  };
+
   inputEl.addEventListener("input", function () { autoGrow(); showSuggestions(inputEl.value); });
   inputEl.addEventListener("focus", function () { showSuggestions(inputEl.value); });
   inputEl.addEventListener("blur", function () { setTimeout(hideSuggestions, 150); });
