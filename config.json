@@ -1,0 +1,8 @@
+{
+  "db_dialect": "sqlite",
+  "db_dsn": "./data.db",
+  "seed_demo": true,
+  "transport": "both",
+  "http_addr": ":8082",
+  "search_provider": "bing"
+}

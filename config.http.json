@@ -1,0 +1,7 @@
+{
+  "db_dialect": "sqlite",
+  "db_dsn": "./data.db",
+  "seed_demo": true,
+  "transport": "http",
+  "http_addr": ":9000"
+}
